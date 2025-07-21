@@ -1,0 +1,110 @@
+# Ubuntu version as ARG
+ARG UBUNTU_VERSION=24.04
+
+FROM ubuntu:${UBUNTU_VERSION}
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+
+# =============================================================================
+# System setup and package installation
+# =============================================================================
+
+# Add repositories and update system
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y universe && \
+    add-apt-repository -y multiverse && \
+    add-apt-repository -y restricted && \
+    apt-get update && \
+    apt-get upgrade -y
+
+# Install basic dependencies
+RUN apt-get install -y --no-install-recommends \
+    # Build tools
+    build-essential \
+    cmake \
+    pkg-config \
+    git \
+    ninja-build \
+    # System utilities
+    sudo \
+    wget \
+    unzip \
+    zip \
+    file \
+    # SSL and certificates
+    apt-transport-https \
+    ca-certificates \
+    # Development libraries
+    libopencv-dev \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    libcurl4-openssl-dev \
+    # Python dependencies
+    python3-tk \
+    python3-lxml \
+    python3-six \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy dx_rt source
+COPY dx_rt /dx_rt
+
+# Copy runtime library source
+COPY deps /runtime_library/deps     
+COPY include /runtime_library/include
+COPY src /runtime_library/src
+COPY CMakeLists.txt /runtime_library/CMakeLists.txt
+
+# =============================================================================
+# dx_rt installation
+# =============================================================================
+
+# Install and build dx_rt
+RUN echo "===== Starting dx_rt installation =====" && \
+    cd /dx_rt && \
+    # Install dependencies
+    echo "===== Installing dependencies... =====" && \
+    ./install.sh --all && \
+    # Build dx_rt
+    echo "===== Building dx_rt... =====" && \
+    bash ./build.sh && \
+    ldconfig && \
+    # Verify installation
+    if [ -f /usr/local/lib/libdxrt.so ]; then \
+        echo "✓ libdxrt.so found:" && \
+        ls -la /usr/local/lib/libdxrt.so && \
+        file /usr/local/lib/libdxrt.so; \
+    else \
+        echo "✗ libdxrt.so not found"; \
+        exit 1; \
+    fi
+
+# =============================================================================
+# Runtime library build
+# =============================================================================
+
+# Build runtime_library
+RUN echo "===== Starting runtime_library build =====" && \
+    # Create build directory
+    mkdir -p /build_runtime && \
+    cd /build_runtime && \
+    # Configure with CMake
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          /runtime_library && \
+    # Build and install
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    # Verify build
+    if [ -f /usr/local/lib/libRuntimeLibrary.so ]; then \
+        echo "✓ libRuntimeLibrary.so found:" && \
+        ls -la /usr/local/lib/libRuntimeLibrary.so && \
+        file /usr/local/lib/libRuntimeLibrary.so; \
+    else \
+        echo "✗ libRuntimeLibrary.so not found"; \
+        exit 1; \
+    fi

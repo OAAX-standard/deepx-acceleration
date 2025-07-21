@@ -1,0 +1,34 @@
+dx_rt/
+images/
+
+# Build artifacts
+build/
+artifacts/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Docker images
+example_*_ubuntu*
+
+# Model files (large files)
+*.dxnn
+*.onnx
+*.pb
+
+# Archive files
+*.zip
+*.tar.gz
+*.tar.bz2 

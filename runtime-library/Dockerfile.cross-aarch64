@@ -1,0 +1,123 @@
+# Ubuntu version as ARG
+ARG UBUNTU_VERSION=24.04
+
+FROM ubuntu:${UBUNTU_VERSION}
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+
+# =============================================================================
+# System setup and package installation
+# =============================================================================
+
+# Add repositories and update system
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y universe && \
+    add-apt-repository -y multiverse && \
+    add-apt-repository -y restricted && \
+    apt-get update && \
+    apt-get upgrade -y
+
+# Install basic dependencies (including cross-compilation tools)
+RUN apt-get install -y --no-install-recommends \
+    # Build tools
+    build-essential \
+    cmake \
+    pkg-config \
+    git \
+    ninja-build \
+    # System utilities
+    sudo \
+    wget \
+    unzip \
+    zip \
+    file \
+    # SSL and certificates
+    apt-transport-https \
+    ca-certificates \
+    # Development libraries
+    libopencv-dev \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    libcurl4-openssl-dev \
+    # Python dependencies
+    python3-tk \
+    python3-lxml \
+    python3-six \
+    # Cross-compilation tools for aarch64
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy dx_rt source
+COPY dx_rt /dx_rt
+
+# Copy runtime library source
+COPY deps /runtime_library/deps     
+COPY include /runtime_library/include
+COPY src /runtime_library/src
+COPY CMakeLists.txt /runtime_library/CMakeLists.txt
+
+# =============================================================================
+# dx_rt installation
+# =============================================================================
+
+# Install and build dx_rt for aarch64
+RUN echo "===== Starting dx_rt installation =====" && \
+    cd /dx_rt && \
+    # Install dependencies for aarch64
+    echo "===== Installing dependencies... =====" && \
+    ./install.sh --arch aarch64 --all && \
+    # Build dx_rt for aarch64
+    echo "===== Building dx_rt... =====" && \
+    bash ./build.sh --arch aarch64 --install /usr/local && \
+    ldconfig && \
+    # Verify installation
+    if [ -f /usr/local/lib/libdxrt.so ]; then \
+        echo "✓ libdxrt.so found:" && \
+        ls -la /usr/local/lib/libdxrt.so && \
+        file /usr/local/lib/libdxrt.so; \
+    else \
+        echo "✗ libdxrt.so not found"; \
+        exit 1; \
+    fi
+
+# =============================================================================
+# Runtime library cross-compilation
+# =============================================================================
+
+# Cross-compile runtime_library for aarch64
+RUN echo "===== Starting runtime_library cross-compilation =====" && \
+    # Create build directory
+    mkdir -p /build_runtime && \
+    cd /build_runtime && \
+    # Configure with CMake for cross-compilation
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+          -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+          -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+          -DCMAKE_FIND_ROOT_PATH=/usr/local \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+          -DCMAKE_CXX_FLAGS="-I/usr/local/include" \
+          -DCMAKE_C_FLAGS="-I/usr/local/include" \
+          /runtime_library && \
+    # Build and install
+    make -j$(nproc) && \
+    make install && \
+    # Verify build
+    if [ -f /usr/local/lib/libRuntimeLibrary.so ]; then \
+        echo "✓ libRuntimeLibrary.so found:" && \
+        ls -la /usr/local/lib/libRuntimeLibrary.so && \
+        file /usr/local/lib/libRuntimeLibrary.so; \
+    else \
+        echo "✗ libRuntimeLibrary.so not found"; \
+        exit 1; \
+    fi
