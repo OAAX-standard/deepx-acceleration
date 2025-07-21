@@ -92,6 +92,13 @@ TEMP_DOWNLOAD_DIR="temp_download"
 rm -rf "$TEMP_DOWNLOAD_DIR" 2>/dev/null || true
 mkdir -p "$TEMP_DOWNLOAD_DIR"
 
+# Ensure that downloader.py exists in scripts directory
+DOWNLOADER_SCRIPT="../scripts/downloader.py"
+if [[ ! -f "$DOWNLOADER_SCRIPT" ]]; then
+    echo "Error: downloader.py script not found in the 'scripts' directory in the parent directory"
+    exit 1
+fi
+
 # Download using downloader.py
 echo "Authenticating and downloading from DeepX developer portal..."
 if python3 "$DOWNLOADER_SCRIPT" \
