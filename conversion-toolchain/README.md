@@ -71,11 +71,11 @@ The second step is to build the Docker image that performs the conversion from O
 3. **Builds** the Docker environment using the provided [Dockerfile](Dockerfile)
 4. **Saves** the resulting Docker image as a `.tar` archive in the `artifacts/` directory
 
-> 💡 The Docker image is tagged as both `onnx-to-dxnn:dx_com_v{version}` and `onnx-to-dxnn:latest`
+> 💡 The Docker image is tagged as both `oaax-deepx-toolchain:{version}` and `oaax-deepx-toolchain:latest`
 
 #### Build Output
 
-After successful execution of `build-toolchain.sh`, you'll find the Docker image archive ready for use in the `artifacts/` directory: `artifacts/onnx-to-dxnn-dx_com_v{version}.tar`
+After successful execution of `build-toolchain.sh`, you'll find the Docker image archive ready for use in the `artifacts/` directory: `artifacts/oaax-deepx-toolchain.tar`
 
 ### Step 2: Prepare Your Model
 
@@ -138,7 +138,7 @@ Once the Docker image is built and your model is prepared, you can convert your 
 
 #### Example
 ```bash
-docker run -v ./artifacts:/app/artifacts -v ./dx_com:/app/dx_com onnx-to-dxnn:latest /app/artifacts/YOLOV5-1.zip /app/artifacts
+docker run -v ./artifacts:/app/artifacts -v ./dx_com:/app/dx_com oaax-deepx-toolchain:latest /app/artifacts/YOLOV5-1.zip /app/artifacts
 ```
 > ⚠️ **Note**: The file `YOLOV5-1.zip` must exist under the `./artifacts` directory.
 Refer to the example command in Step 2 for how to generate this file.
@@ -146,7 +146,7 @@ Refer to the example command in Step 2 for how to generate this file.
 ######  Command Breakdown
 - `-v ./artifacts:/app/artifacts`: Mounts the `artifacts/` directory from the host machine to `/app/artifacts` inside the Docker container
 - `-v ./dx_com:/app/dx_com`: Mounts the `dx_com/` directory from the host machine to `/app/dx_com` inside the Docker container
-- `onnx-to-dxnn:latest`: The Docker image to use
+- `oaax-deepx-toolchain:latest`: The Docker image to use
 - `/app/artifacts/YOLOV5-1.zip`: Path to the `YOLOV5-1.zip` file inside the Docker container
 - `/app/artifacts`: Output directory inside the Docker container
 
