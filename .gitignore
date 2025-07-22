@@ -1,6 +1,12 @@
 dx_rt/
 images/
 
+# DEEPX proprietary files
+temp_download/
+dx_com/
+sample/
+calibration_dataset/
+
 # Build artifacts
 build/
 artifacts/
