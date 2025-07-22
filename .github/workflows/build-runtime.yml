@@ -6,9 +6,16 @@ on:
     #   - main
 
 jobs:
-  build-runtime-for-x86_64-ubuntu-20-04:
-    timeout-minutes: 10  # Set a timeout of 10 minutes for the job
+  build-runtime:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ubuntu_version: ["20.04", "22.04", "24.04"]
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+
+    name: Build runtime for ${{ matrix.arch }}-ubuntu-${{ matrix.ubuntu_version }}
 
     steps:
       - name: Checkout
@@ -46,7 +53,11 @@ jobs:
       - name: Compile runtime
         run: |
           cd runtime-library
-          ./build-runtimes.sh --os 20.04
+            if [ "${{ matrix.arch }}" = "aarch64" ]; then
+              ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+            else
+              ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+            fi
 
       - name: Determine version
         run: |
@@ -61,4 +72,4 @@ jobs:
         run: |
           # get the path to the library file
           library_file=$(find runtime-library/artifacts -name "*.so" | head -n 1)
-          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/Ubuntu/20.04/x86_64/library.tar.gz"
+          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/Ubuntu/${{ matrix.ubuntu_version }}/${{ matrix.arch }}/library.tar.gz"
