@@ -44,7 +44,9 @@ jobs:
           ./download_dxrt.sh
 
       - name: Compile runtime
-        run: ./build-runtimes.sh --os 20.04
+        run: |
+          cd runtime-library
+          ./build-runtimes.sh --os 20.04
 
       - name: Determine version
         run: |
