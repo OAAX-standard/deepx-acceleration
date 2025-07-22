@@ -18,7 +18,7 @@ jobs:
           submodules: 'recursive'
           lfs: true
 
-      - name: Install s3cmd
+      - name: Install s3cmd and Python dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y s3cmd
@@ -40,6 +40,7 @@ jobs:
         run: |
           export DX_USERNAME="${{ secrets.DX_USERNAME }}"
           export DX_PASSWORD="${{ secrets.DX_PASSWORD }}"
+          cd runtime-library
           ./download_dxrt.sh
 
       - name: Compile runtime
