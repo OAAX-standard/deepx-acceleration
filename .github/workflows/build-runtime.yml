@@ -59,4 +59,4 @@ jobs:
 
       - name: Upload runtimes to S3
         run: |
-          s3cmd put "runtime-library/artifacts/*/libRuntimeLibrary.so" "s3://oaax/runtimes/${{ env.version }}/DEEPX/Ubuntu/20.04/x86_64/library.tar.gz"
+          s3cmd put "runtime-library/artifacts/x86_64-ubuntu22.04/libRuntimeLibrary.so" "s3://oaax/runtimes/${{ env.version }}/DEEPX/Ubuntu/20.04/x86_64/library.tar.gz"
