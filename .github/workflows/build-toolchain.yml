@@ -8,7 +8,7 @@ on:
 jobs:
   build-toolchain:
     timeout-minutes: 10  # Set a timeout of 10 minutes for the job
-    runs-on: self-hosted
+    runs-on: hetzner
     container:
       image: ubuntu:22.04  # or any other image
       options: --volume /var/run/docker.sock:/var/run/docker.sock
