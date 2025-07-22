@@ -19,12 +19,11 @@ The DeepX conversion toolchain consists of **three main phases**:
 ---
 ## Getting Started
 
-### Step 1: Build the Docker Image
+### Step 1: Download DEEPX's DX-COM
 
-The first step is to build the Docker image that contains the DX-COM conversion environment.
+The first step is to download the DeepX compiler (DX-COM) package using the provided script and unpack it into the `dx_com/` directory. This package is required for converting ONNX models to DXNN format.
 
 > ⚠️ **Prerequisites**: 
-> - Docker must be installed on your system
 > - Python 3 with `requests` and `beautifulsoup4` packages installed (`pip install requests beautifulsoup4`) (used by [downloader.py](../scripts/downloader.py))
 > - Valid credentials for the [DeepX Developer Portal](https://developer.deepx.ai/) (required to download DX-COM)
 
@@ -32,7 +31,7 @@ The first step is to build the Docker image that contains the DX-COM conversion 
 
 ##### **Using default settings:**
 ```bash
-DX_USERNAME="your_username" DX_PASSWORD="your_password" ./build-toolchain.sh
+DX_USERNAME="your_username" DX_PASSWORD="your_password" ./setup-dx_com.sh
 ```
 > ⚠️ **Authentication Required**: You need a [DeepX Developer Portal](https://developer.deepx.ai/) account to download DX-COM. 
 > - The script will prompt for credentials if not provided via environment variables
@@ -40,7 +39,7 @@ DX_USERNAME="your_username" DX_PASSWORD="your_password" ./build-toolchain.sh
 
 ##### **Specifying expected version and download URL:**
 ```bash
-./build-toolchain.sh --expected-version "1.60.1" --download-url "https://developer.deepx.ai/?files=MjM2NA=="
+./setup-dx_com.sh --expected-version "1.60.1" --download-url "https://developer.deepx.ai/?files=MjM2NA=="
 ```
 
 ###### Command Line Options
@@ -51,12 +50,24 @@ This value must match the version string in the downloaded archive filename.
 - `--download-url <url>`: Specify download URL for DX-COM (default: https://developer.deepx.ai/?files=MjM2NA==)
 - `--help`: Show help message with all available options
 
+#### Setup Output
 
+After successful execution of `setup-dx_com.sh`, you'll find the following:
+
+- `dx_com/` - DeepX compiler files extracted from the downloaded package
+- `sample/` - Example ONNX models and configuration files for testing
+- `calibration_dataset/` - Sample calibration dataset for quantization
+
+### Step 2: Build the Docker Image
+
+The second step is to build the Docker image that performs the conversion from ONNX to DXNN.
+
+> ⚠️ **Prerequisites**: 
+> - Docker must be installed on your system
 
 #### Build Process
 
-1. **Downloads** the specified DX-COM package using [downloader.py](../scripts/downloader.py)
-2. **Copies** the [convert.sh](scripts/convert.sh) entrypoint script and DX-COM into the Docker image  
+1. **Copies** the [convert.sh](scripts/convert.sh) entrypoint script into the Docker image  
 3. **Builds** the Docker environment using the provided [Dockerfile](Dockerfile)
 4. **Saves** the resulting Docker image as a `.tar` archive in the `artifacts/` directory
 
@@ -64,13 +75,7 @@ This value must match the version string in the downloaded archive filename.
 
 #### Build Output
 
-After successful execution of `build-toolchain.sh`, you'll find the following:
-
-- `dx_com/` - DeepX compiler files extracted from the downloaded package
-- `sample/` - Example ONNX models and configuration files for testing
-- `calibration_dataset/` - Sample calibration dataset for quantization
-- `artifacts/onnx-to-dxnn-dx_com_v{version}.tar` - Docker image archive ready for deployment
-
+After successful execution of `build-toolchain.sh`, you'll find the Docker image archive ready for use in the `artifacts/` directory: `artifacts/onnx-to-dxnn-dx_com_v{version}.tar`
 
 ### Step 2: Prepare Your Model
 
@@ -133,13 +138,14 @@ Once the Docker image is built and your model is prepared, you can convert your 
 
 #### Example
 ```bash
-docker run -v ./artifacts:/app/artifacts onnx-to-dxnn:latest /app/artifacts/YOLOV5-1.zip /app/artifacts
+docker run -v ./artifacts:/app/artifacts -v ./dx_com:/app/dx_com onnx-to-dxnn:latest /app/artifacts/YOLOV5-1.zip /app/artifacts
 ```
 > ⚠️ **Note**: The file `YOLOV5-1.zip` must exist under the `./artifacts` directory.
 Refer to the example command in Step 2 for how to generate this file.
 
 ######  Command Breakdown
 - `-v ./artifacts:/app/artifacts`: Mounts the `artifacts/` directory from the host machine to `/app/artifacts` inside the Docker container
+- `-v ./dx_com:/app/dx_com`: Mounts the `dx_com/` directory from the host machine to `/app/dx_com` inside the Docker container
 - `onnx-to-dxnn:latest`: The Docker image to use
 - `/app/artifacts/YOLOV5-1.zip`: Path to the `YOLOV5-1.zip` file inside the Docker container
 - `/app/artifacts`: Output directory inside the Docker container
