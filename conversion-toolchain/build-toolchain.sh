@@ -4,6 +4,9 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Ensure the artifacts directory exists
+mkdir -p artifacts
+
 # Read version from the version file
 VERSION_FILE="../VERSION"
 if [ ! -f "$VERSION_FILE" ]; then
