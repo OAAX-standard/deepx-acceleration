@@ -12,15 +12,17 @@ error_exit() {
 # Print usage
 show_usage() {
     cat << EOF
-Usage: $0 --os <ubuntu_version> [--cross-aarch64] [--crt]
+Usage: $0 --os <ubuntu_version> [--cross-aarch64] [--dxrt-version <version>] [--crt]
   --os:           (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
   --cross-aarch64: (Optional) Cross-compile for aarch64 (only supported on x86_64 hosts)
+  --dxrt-version: (Optional) Version of DX RT used to build the runtime. Default is 2.9.5.
   --crt:          (Optional) Use SSL certificate (only required for DEEPX internal builds)
   -h, --help:     Show this help message
 
 Examples:
-  $0 --os 22.04                    # Build for host architecture
-  $0 --os 22.04 --cross-aarch64    # Cross-compile for aarch64 (x86_64 host only)
+  $0 --os 22.04                         # Build for host architecture
+  $0 --os 22.04 --cross-aarch64         # Cross-compile for aarch64 (x86_64 host only)
+  $0 --os 22.04 --dxrt-version 2.9.5    # Cross-compile for aarch64 (x86_64 host only)
 EOF
     exit 1
 }
@@ -28,11 +30,13 @@ EOF
 # Command line argument parsing
 CROSS_AARCH64=false
 USE_CRT=false
+DXRT_VERSION=2.9.5
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --os) UBUNTU_VERSION="$2"; shift 2 ;;
         --cross-aarch64) CROSS_AARCH64=true; shift ;;
+        --dxrt-version) DXRT_VERSION="$2"; shift 2 ;;
         --crt) USE_CRT=true; shift ;;
         -h|--help) show_usage ;;
         *) error_exit "Unknown option: $1" ;;
@@ -61,6 +65,13 @@ case "$HOST_ARCH" in
         ;;
     *) error_exit "Unsupported host architecture: $HOST_ARCH" ;;
 esac
+
+# Print build configuration
+echo "Build configuration:"
+echo "  Host Architecture: $HOST_ARCH"
+echo "  CROSS_AARCH64: $CROSS_AARCH64"
+echo "  Ubuntu Version: $UBUNTU_VERSION"
+echo "  DX RT Version: $DXRT_VERSION"
 
 # Determine target architecture and Dockerfile
 if [[ "$CROSS_AARCH64" == true ]]; then
@@ -157,6 +168,11 @@ build_in_docker() {
     echo "===== Build process completed successfully ====="
     echo "Docker image: $CONTAINER_NAME"
     echo "Artifacts location: $ARTIFACTS_DIR/libRuntimeLibrary.so"
+
+    echo "===== Compressing the runtime library into tar.gz archive ====="
+    cd $ARTIFACTS_DIR  
+    tar czvf library-$DXRT_VERSION.tar.gz libRuntimeLibrary.so
+    echo "Library package location: $ARTIFACTS_DIR/library-$DXRT_VERSION.tar.gz"
 }
 
 # Main execution

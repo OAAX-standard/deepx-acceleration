@@ -2,8 +2,8 @@ name: Build OAAX runtimes
 
 on:
   push:
-    branches:
-      - main
+    # branches:
+    #   - main
 
 jobs:
   build-runtime:
@@ -53,11 +53,11 @@ jobs:
       - name: Compile runtime
         run: |
           cd runtime-library
-            if [ "${{ matrix.arch }}" = "aarch64" ]; then
-              ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
-            else
-              ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
-            fi
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+          else
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+          fi
 
       - name: Determine version
         run: |
@@ -71,5 +71,5 @@ jobs:
       - name: Upload runtimes to S3
         run: |
           # get the path to the library file
-          library_file=$(find runtime-library/artifacts -name "*.so" | head -n 1)
-          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/Ubuntu/${{ matrix.ubuntu_version }}/${{ matrix.arch }}/library.tar.gz"
+          library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
+          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
