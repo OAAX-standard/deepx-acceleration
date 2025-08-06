@@ -5,8 +5,8 @@ This directory contains the DeepX Runtime Library build system that creates `lib
 ---
 ## Overview
 
-The Runtime Library is a C++ library that provides the core functionality for:
-- Loading DXNN models (converted from ONNX using the DeepX compiler)
+The Runtime Library is a C++ library built on top of DX-RT, providing core functionalities such as:
+- Loading DXNN models
 - Managing input/output tensors for inference
 - Executing model inference on DeepX NPU
 
@@ -22,19 +22,27 @@ The library is built using **Docker** containers to ensure consistent build envi
 
 ### Installing DX-RT
 
-Since the DX-RT GitHub repository (`https://github.com/DEEPX-AI/dx_rt.git`) is not yet public, you need to download it using the [`download_dxrt.sh`](download_dxrt.sh) script.
+Simply clone the DX-RT repository from GitHub:
 
-#### Prerequisites
-- [DeepX Developer Portal](https://developer.deepx.ai/) credentials (same as DX-COM installation)
-- Python 3.8+ with `requests` and `beautifulsoup4` packages
-
-#### Installation
 ```bash
-# Download and install DX-RT (default version: 2.9.5)
-DX_USERNAME="your_username" DX_PASSWORD="your_password" ./download_dxrt.sh
+git clone https://github.com/DEEPX-AI/dx_rt.git
 ```
 
-> **Future Update**: When the DX-RT GitHub repository becomes public, the build system will be updated to use `git clone https://github.com/DEEPX-AI/dx_rt.git` for downloading the DX-RT source code.
+The repository contains all necessary source code and build scripts for the DeepX Runtime (DX-RT).
+
+#### Using Specific Versions
+
+If you need to use a specific version of DX-RT, you can checkout a particular tag after cloning:
+
+```bash
+# List available tags
+git tag
+
+# Checkout a specific version (e.g., v3.0.0)
+git checkout v3.0.0
+```
+
+Available versions can be found in the [DX-RT releases page](https://github.com/DEEPX-AI/dx_rt/releases).
 
 ---
 ## Usage
