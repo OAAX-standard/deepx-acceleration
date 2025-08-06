@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPPORTED_UBUNTU_VERSIONS=("20.04" "22.04" "24.04")
+CROSS_AARCH64=false
+USE_CRT=false
 
 # Error handling
 error_exit() {
@@ -12,89 +14,18 @@ error_exit() {
 # Print usage
 show_usage() {
     cat << EOF
-Usage: $0 --os <ubuntu_version> [--cross-aarch64] [--dxrt-version <version>] [--crt]
+Usage: $0 --os <ubuntu_version> [--cross-aarch64] [--crt]
   --os:           (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
   --cross-aarch64: (Optional) Cross-compile for aarch64 (only supported on x86_64 hosts)
-  --dxrt-version: (Optional) Version of DX RT used to build the runtime. Default is 2.9.5.
   --crt:          (Optional) Use SSL certificate (only required for DEEPX internal builds)
   -h, --help:     Show this help message
 
 Examples:
   $0 --os 22.04                         # Build for host architecture
   $0 --os 22.04 --cross-aarch64         # Cross-compile for aarch64 (x86_64 host only)
-  $0 --os 22.04 --dxrt-version 2.9.5    # Cross-compile for aarch64 (x86_64 host only)
 EOF
     exit 1
 }
-
-# Command line argument parsing
-CROSS_AARCH64=false
-USE_CRT=false
-DXRT_VERSION=2.9.5
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --os) UBUNTU_VERSION="$2"; shift 2 ;;
-        --cross-aarch64) CROSS_AARCH64=true; shift ;;
-        --dxrt-version) DXRT_VERSION="$2"; shift 2 ;;
-        --crt) USE_CRT=true; shift ;;
-        -h|--help) show_usage ;;
-        *) error_exit "Unknown option: $1" ;;
-    esac
-done
-
-# Validate required arguments
-[[ -z "$UBUNTU_VERSION" ]] && error_exit "--os argument is required"
-
-# Validate Ubuntu version
-if [[ ! " ${SUPPORTED_UBUNTU_VERSIONS[*]} " =~ " ${UBUNTU_VERSION} " ]]; then
-    error_exit "Unsupported Ubuntu version '$UBUNTU_VERSION'. Supported: ${SUPPORTED_UBUNTU_VERSIONS[*]}"
-fi
-
-# Setup variables
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Architecture detection
-HOST_ARCH=$(uname -m)
-case "$HOST_ARCH" in
-    x86_64) ;;
-    aarch64) 
-        if [[ "$CROSS_AARCH64" == true ]]; then
-            error_exit "Cross-compilation for aarch64 is not supported on aarch64 hosts"
-        fi
-        ;;
-    *) error_exit "Unsupported host architecture: $HOST_ARCH" ;;
-esac
-
-# Print build configuration
-echo "Build configuration:"
-echo "  Host Architecture: $HOST_ARCH"
-echo "  CROSS_AARCH64: $CROSS_AARCH64"
-echo "  Ubuntu Version: $UBUNTU_VERSION"
-echo "  DX RT Version: $DXRT_VERSION"
-
-# Determine target architecture and Dockerfile
-if [[ "$CROSS_AARCH64" == true ]]; then
-    TARGET_ARCH="aarch64"
-    if [[ "$USE_CRT" == true ]]; then
-        DOCKERFILE="Dockerfile.cross-aarch64.crt"
-    else
-        DOCKERFILE="Dockerfile.cross-aarch64"
-    fi
-    echo "Cross-compiling for aarch64 on x86_64 host"
-else
-    TARGET_ARCH="$HOST_ARCH"
-    if [[ "$USE_CRT" == true ]]; then
-        DOCKERFILE="Dockerfile.native.crt"
-    else
-        DOCKERFILE="Dockerfile.native"
-    fi
-    echo "Building for host architecture: $HOST_ARCH"
-fi
-
-# Container and build setup
-CONTAINER_NAME="runtime_library_${TARGET_ARCH}_ubuntu${UBUNTU_VERSION//./}"
-ARTIFACTS_DIR="artifacts/${TARGET_ARCH}-ubuntu${UBUNTU_VERSION}"
 
 # File validation function
 validate_files() {
@@ -116,6 +47,98 @@ validate_files() {
     done
 }
 
+# Function to read DXRT version from release.ver file
+read_dxrt_version() {
+    local release_file="dx_rt/release.ver"
+    
+    if [[ ! -f "$release_file" ]]; then
+        error_exit "DX-RT release file not found: $release_file. Please ensure dx_rt directory exists and contains release.ver file."
+    fi
+    
+    local version=$(cat "$release_file" | tr -d '[:space:]')
+    if [[ -z "$version" ]]; then
+        error_exit "Failed to read version from $release_file. File appears to be empty."
+    fi
+    
+    echo "$version"
+}
+
+# Disable Python option in DX-RT cmake configuration
+disable_dxrt_python_option() {
+    local cmake_file="dx_rt/cmake/dxrt.cfg.cmake"
+    
+    if [[ ! -f "$cmake_file" ]]; then
+        error_exit "DX-RT cmake configuration file not found: $cmake_file"
+    fi
+    
+    # Create backup of original file
+    cp "$cmake_file" "${cmake_file}.backup"
+    
+    # Replace ON with OFF for Python option
+    sed -i 's/option(USE_PYTHON "Use Python" ON)/option(USE_PYTHON "Use Python" OFF)/' "$cmake_file"
+    
+    echo "Python option disabled in $cmake_file (backup saved as ${cmake_file}.backup)"
+}
+
+validate_files
+
+# Read DXRT version from release.ver file
+DXRT_VERSION=$(read_dxrt_version)
+echo "DX-RT version read from dx_rt/release.ver: $DXRT_VERSION"
+
+disable_dxrt_python_option
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --os) UBUNTU_VERSION="$2"; shift 2 ;;
+        --cross-aarch64) CROSS_AARCH64=true; shift ;;
+        --crt) USE_CRT=true; shift ;;
+        -h|--help) show_usage ;;
+        *) error_exit "Unknown option: $1" ;;
+    esac
+done
+
+# Validate required arguments
+[[ -z "$UBUNTU_VERSION" ]] && error_exit "--os argument is required"
+
+# Validate Ubuntu version
+if [[ ! " ${SUPPORTED_UBUNTU_VERSIONS[*]} " =~ " ${UBUNTU_VERSION} " ]]; then
+    error_exit "Unsupported Ubuntu version '$UBUNTU_VERSION'. Supported: ${SUPPORTED_UBUNTU_VERSIONS[*]}"
+fi
+
+# Architecture detection
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+    x86_64) ;;
+    aarch64) 
+        if [[ "$CROSS_AARCH64" == true ]]; then
+            error_exit "Cross-compilation for aarch64 is not supported on aarch64 hosts"
+        fi
+        ;;
+    *) error_exit "Unsupported host architecture: $HOST_ARCH" ;;
+esac
+
+# Determine target architecture and Dockerfile
+if [[ "$CROSS_AARCH64" == true ]]; then
+    TARGET_ARCH="aarch64"
+    if [[ "$USE_CRT" == true ]]; then
+        DOCKERFILE="Dockerfile.cross-aarch64.crt"
+    else
+        DOCKERFILE="Dockerfile.cross-aarch64"
+    fi
+else
+    TARGET_ARCH="$HOST_ARCH"
+    if [[ "$USE_CRT" == true ]]; then
+        DOCKERFILE="Dockerfile.native.crt"
+    else
+        DOCKERFILE="Dockerfile.native"
+    fi
+fi
+
+# Container and build setup
+CONTAINER_NAME="runtime_library_${TARGET_ARCH}_ubuntu${UBUNTU_VERSION//./}"
+ARTIFACTS_DIR="artifacts/${TARGET_ARCH}-ubuntu${UBUNTU_VERSION}"
+
 # Setup artifacts directory
 setup_artifacts_dir() {
     echo "Setting up artifacts directory: $ARTIFACTS_DIR"
@@ -134,7 +157,7 @@ setup_artifacts_dir() {
 # Main build function
 build_in_docker() {
     echo "===== Build process started ====="
-    echo "Host Architecture: $HOST_ARCH, Target: $TARGET_ARCH, Ubuntu: $UBUNTU_VERSION"
+    echo "Host Architecture: $HOST_ARCH, Target: $TARGET_ARCH, Ubuntu: $UBUNTU_VERSION, DX-RT Version: $DXRT_VERSION"
     if [[ "$USE_CRT" == true ]]; then
         echo "SSL certificate installation: Enabled"
     else
@@ -171,8 +194,8 @@ build_in_docker() {
 
     echo "===== Compressing the runtime library into tar.gz archive ====="
     cd $ARTIFACTS_DIR  
-    tar czvf library-$DXRT_VERSION.tar.gz libRuntimeLibrary.so
-    echo "Library package location: $ARTIFACTS_DIR/library-$DXRT_VERSION.tar.gz"
+    tar czvf library-dxrt-$DXRT_VERSION.tar.gz libRuntimeLibrary.so
+    echo "Library package location: $ARTIFACTS_DIR/library-dxrt-$DXRT_VERSION.tar.gz"
 }
 
 # Main execution
@@ -181,7 +204,6 @@ main() {
     echo "Build execution started at $(date)"
     echo "========================================"
     
-    validate_files
     setup_artifacts_dir
     build_in_docker
     
