@@ -1,5 +1,5 @@
 #include "runtime_core.h"
-#include "concurrent_queue.h"
+#include "concurrentqueue.h"
 
 extern "C" {
 #include "queue.h"
@@ -9,6 +9,7 @@ extern "C" {
 #include <atomic>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 #include <pthread.h>
 #include <time.h>
@@ -17,8 +18,6 @@ extern "C" {
 #include <stdio.h>
 
 #include <dxrt/dxrt_api.h>
-
-#define QUEUE_CAPACITY 100
 
 // Structure to track job_id with its associated aligned_buffer
 struct JobData {
@@ -29,12 +28,13 @@ struct JobData {
 // Global variables
 static dxrt::InferenceEngine *inference_engine = nullptr;
 static char *_error_message = NULL;
-Logger *logger = NULL;  // Make it accessible from C code
+Logger *logger = NULL;
 static LogLevel log_level = LOG_INFO;
 
-// Queues
-static Queue *input_queue = NULL, *output_queue = NULL;
-static ConcurrentQueue<JobData> job_data_queue(QUEUE_CAPACITY);
+// Replace queues with moodycamel::ConcurrentQueue
+static moodycamel::ConcurrentQueue<tensors_struct*> input_queue;
+static moodycamel::ConcurrentQueue<tensors_struct*> output_queue;
+static moodycamel::ConcurrentQueue<JobData> job_data_queue;
 
 // Running threads
 static pthread_t inference_thread, wait_thread;
@@ -175,7 +175,7 @@ static tensors_struct* create_output_tensors_from_dxrt(const std::vector<std::sh
         
         memcpy(output_tensors->data[i], data, data_size);
     }
-    
+
     return output_tensors;
 }
 
@@ -200,7 +200,7 @@ static tensor_data_type mapDataTypeToTensorDataType(dxrt::DataType dtype) {
     case dxrt::FLOAT:
         return DATA_TYPE_FLOAT;
     default:
-        return DATA_TYPE_FLOAT;  // Default case
+        return DATA_TYPE_FLOAT;
     }
 }
 
@@ -246,7 +246,7 @@ static int runtime_inference_execution(tensors_struct *input_tensors) {
         JobData job_data;
         job_data.job_id = job_id;
         job_data.aligned_buffer = aligned_buffer;
-        job_data_queue.push(job_data);
+        job_data_queue.enqueue(job_data);
         
         log_debug(logger, "Pushed job_id: %d", job_id);
 
@@ -264,14 +264,17 @@ static int runtime_inference_execution(tensors_struct *input_tensors) {
 }
 
 static void *inference_loop(void *arg) {
-    (void)arg; // Suppress unused parameter warning
+    (void)arg;
     
     log_info(logger, "Starting the inference thread");
     int exit_code = 0;
     
     while (1) {
-        tensors_struct *input_tensors = dequeue(input_queue, 200);
-        if (input_tensors != NULL) {
+        
+        tensors_struct *input_tensors = nullptr;
+        bool dequeued = input_queue.try_dequeue(input_tensors);
+        
+        if (dequeued && input_tensors != NULL) {
             // Check for sentinel (num_tensors = 0 indicates sentinel)
             if (input_tensors->num_tensors == 0) {
                 log_info(logger, "Received sentinel, stopping inference thread");
@@ -281,14 +284,15 @@ static void *inference_loop(void *arg) {
             
             log_debug(logger, "Running inference");
             exit_code = runtime_inference_execution(input_tensors);
-            
+
             deep_free_tensors_struct(input_tensors);
             
             if (exit_code != 0) {
                 log_error(logger, "Inference execution failed");
             }
         } else {
-            log_debug(logger, "input_tensors is NULL - waiting for input");
+            log_debug(logger, "No input tensors available - waiting");
+            usleep(1000); // 1ms sleep instead of blocking
         }
 
         if (stop_thread.load()) {
@@ -300,13 +304,19 @@ static void *inference_loop(void *arg) {
 }
 
 static void *wait_loop(void *arg) {
-    (void)arg; // Suppress unused parameter warning
+    (void)arg;
     
     log_info(logger, "Starting the wait thread");
     
     while (1) {
-        // Pop item from queue (will wait if empty)
-        JobData job_data = job_data_queue.pop();
+        // Try to dequeue item from queue
+        JobData job_data;
+        bool dequeued = job_data_queue.try_dequeue(job_data);
+        
+        if (!dequeued) {
+            usleep(1000); // 1ms sleep instead of blocking
+            continue;
+        }
         
         // Check for sentinel (job_id = -1 indicates sentinel)
         if (stop_thread.load() || job_data.job_id == -1) {
@@ -317,11 +327,10 @@ static void *wait_loop(void *arg) {
         log_debug(logger, "Waiting for job_id: %d", job_data.job_id);
         
         try {
-            // Wait for the inference to complete
             std::vector<std::shared_ptr<dxrt::Tensor>> outputs = inference_engine->Wait(job_data.job_id);
 
             std::cout << "[Inference] Received output tensors for job_id : " << job_data.job_id << std::endl;
-            
+
             // Free aligned_buffer after Wait() completes
             if (job_data.aligned_buffer) {
                 free(job_data.aligned_buffer);
@@ -335,11 +344,7 @@ static void *wait_loop(void *arg) {
                 continue;
             }
             
-            // Enqueue output tensors
-            if (enqueue(output_queue, output_tensors) != 0) {
-                log_error(logger, "Failed to enqueue output tensors");
-                deep_free_tensors_struct(output_tensors);
-            }
+            output_queue.enqueue(output_tensors);
             
         } catch (const std::exception& e) {
             log_error(logger, "Error in wait loop: %s", e.what());
@@ -351,33 +356,19 @@ static void *wait_loop(void *arg) {
 int runtime_initialization() {
     srand(time(NULL));
     
-    // Initialize logger with better error handling
+    // Initialize logger
     logger = create_logger(runtime_name(), "runtime.log", log_level, LOG_INFO);
     if (logger == NULL) {
         printf("Warning: Failed to create logger, continuing without file logging\n");
-        // Continue without logger - many functions now handle NULL logger safely
     } else {
         log_info(logger, "Initializing the runtime environment");
-    }
-
-    // Initialize queues
-    input_queue = new_queue(QUEUE_CAPACITY);
-    output_queue = new_queue(QUEUE_CAPACITY);
-
-    if (!input_queue || !output_queue) {
-        if (logger != NULL) {
-            log_error(logger, "Failed to create queues");
-        } else {
-            printf("Error: Failed to create queues\n");
-        }
-        return 1;
     }
 
     return 0;
 }
 
 int runtime_initialization_with_args(int length, const char **keys, const void **values) {
-    (void)values; // Suppress unused parameter warning
+    (void)values;
     
     int ret = runtime_initialization();
     if (ret != 0) {
@@ -402,7 +393,6 @@ int runtime_model_loading(const char *file_path) {
 
     try {
         inference_engine = new dxrt::InferenceEngine(std::string(file_path));
-        // No callback registration needed - we'll use Wait() instead
         
         stop_thread.store(0);
 
@@ -425,17 +415,17 @@ int runtime_model_loading(const char *file_path) {
 
 int send_input(tensors_struct *input_tensors) {
     log_debug(logger, "Sending input tensors to the queue");
-    if (enqueue(input_queue, input_tensors) != 0) {
-        log_error(logger, "Failed to enqueue input tensors");
-        return 1;
-    }
+    input_queue.enqueue(input_tensors);
+
     return 0;
 }
 
 int receive_output(tensors_struct **output_tensors) {
     log_debug(logger, "Receiving output tensors from the queue");
-    tensors_struct *output = dequeue(output_queue, 200);
-    if (output == NULL) {
+    tensors_struct *output = nullptr;
+    bool dequeued = output_queue.try_dequeue(output);
+    
+    if (!dequeued || output == NULL) {
         log_debug(logger, "No output tensors available");
         *output_tensors = NULL;
         return 1;
@@ -453,23 +443,19 @@ int runtime_destruction() {
 
     // Push dummy job to unblock wait_loop
     JobData sentinel = {-1, nullptr};
-    job_data_queue.push(sentinel);
+    job_data_queue.enqueue(sentinel);
 
     // Push dummy input tensors to unblock inference_loop
     tensors_struct *dummy_input = (tensors_struct *)calloc(1, sizeof(tensors_struct));
     if (dummy_input) {
         dummy_input->num_tensors = 0; // Mark as sentinel
-        if (enqueue(input_queue, dummy_input) != 0) {
-            // If enqueue fails, free the dummy input immediately
-            free(dummy_input);
-            log_warning(logger, "Failed to enqueue dummy input, freed immediately");
-        }
+        input_queue.enqueue(dummy_input);
     }
 
     // Give threads time to process the sentinel and stop naturally
     sleep(1);
 
-    // Join inference thread (should terminate naturally with sentinel)
+    // Join inference thread
     int join_result = pthread_join(inference_thread, NULL);
     if (join_result != 0) {
         log_error(logger, "Failed to join inference thread: %d", join_result);
@@ -477,7 +463,7 @@ int runtime_destruction() {
         log_info(logger, "Inference thread terminated successfully");
     }
     
-    // Join wait thread (should terminate naturally with sentinel)
+    // Join wait thread
     join_result = pthread_join(wait_thread, NULL);
     if (join_result != 0) {
         log_error(logger, "Failed to join wait thread: %d", join_result);
@@ -492,31 +478,10 @@ int runtime_destruction() {
         log_info(logger, "Inference engine destroyed");
     }
 
-    // Clean up queues
-    if (input_queue != NULL) {
-        shutdown_queue(input_queue);
-        free_queue(input_queue);
-        input_queue = NULL;
-        log_info(logger, "Input queue destroyed");
-    }
-    
-    if (output_queue != NULL) {
-        shutdown_queue(output_queue);
-        free_queue(output_queue);
-        output_queue = NULL;
-        log_info(logger, "Output queue destroyed");
-    }
-
-    // Clean up error message
-    if (_error_message != NULL) {
-        free(_error_message);
-        _error_message = NULL;
-    }
-
     // Log final message before closing logger
     log_info(logger, "Runtime destruction completed");
 
-    // Clean up logger (moved to the end)
+    // Clean up logger
     if (logger != NULL) {
         close_logger(logger);
         logger = NULL;

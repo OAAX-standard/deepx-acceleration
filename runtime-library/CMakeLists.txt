@@ -32,7 +32,7 @@ set(SOURCES
 # Add header files
 set(HEADERS
     include/runtime_core.h
-    include/concurrent_queue.h
+    include/concurrentqueue.h
     deps/tools/c-utilities/include/queue.h
     deps/tools/c-utilities/include/logger.h
     deps/tools/c-utilities/include/tensors_struct.h
