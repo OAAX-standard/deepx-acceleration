@@ -2,8 +2,8 @@ name: Build OAAX runtimes
 
 on:
   push:
-    branches:
-      - main
+    # branches:
+    #   - main
 
 jobs:
   build-runtime:
@@ -31,7 +31,26 @@ jobs:
           sudo apt-get install -y s3cmd
           pip install requests beautifulsoup4
 
+      - name: Download DX RT
+        run: |
+          cd runtime-library
+          DX_RT_VERSION="2.9.5"
+          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${DX_RT_VERSION}.zip
+          unzip v*.zip
+          rm v*.zip
+          mv dx_rt-* dx_rt
+
+      - name: Compile runtime
+        run: |
+          cd runtime-library
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+          else
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+          fi
+
       - name: Configure s3cmd
+        if: github.ref == 'refs/heads/main'
         run: |
           cat > ~/.s3cfg <<EOF
           [default]
@@ -43,23 +62,8 @@ jobs:
           use_https = True
           EOF
 
-      - name: Download DX RT
-        run: |
-          export DX_USERNAME="${{ secrets.DX_USERNAME }}"
-          export DX_PASSWORD="${{ secrets.DX_PASSWORD }}"
-          cd runtime-library
-          ./download_dxrt.sh
-
-      - name: Compile runtime
-        run: |
-          cd runtime-library
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
-          else
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
-          fi
-
       - name: Determine version
+        if: github.ref == 'refs/heads/main'
         run: |
           if [ -f VERSION ]; then
             version=$(cat VERSION)
@@ -69,7 +73,9 @@ jobs:
           echo "version=$version" >> $GITHUB_ENV
 
       - name: Upload runtimes to S3
+        if: github.ref == 'refs/heads/main'
         run: |
           # get the path to the library file
           library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
+          echo "Uploading $library_file to s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
