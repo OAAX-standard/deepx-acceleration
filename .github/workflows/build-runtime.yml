@@ -1,0 +1,81 @@
+name: Build OAAX runtimes
+
+on:
+  push:
+    # branches:
+    #   - main
+
+jobs:
+  build-runtime:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ubuntu_version: ["20.04", "22.04", "24.04"]
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+
+    name: Build runtime for ${{ matrix.arch }}-ubuntu-${{ matrix.ubuntu_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          submodules: 'recursive'
+          lfs: true
+
+      - name: Install s3cmd and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y s3cmd
+          pip install requests beautifulsoup4
+
+      - name: Download DX RT
+        run: |
+          cd runtime-library
+          DX_RT_VERSION="2.9.5"
+          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${DX_RT_VERSION}.zip
+          unzip v*.zip
+          rm v*.zip
+          mv dx_rt-* dx_rt
+
+      - name: Compile runtime
+        run: |
+          cd runtime-library
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+          else
+            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+          fi
+
+      - name: Configure s3cmd
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cat > ~/.s3cfg <<EOF
+          [default]
+          access_key = ${{ secrets.S3_ACCESS_KEY }}
+          secret_key = ${{ secrets.S3_SECRET_KEY }}
+          bucket_location = us-east-1
+          host_base = ${{ secrets.S3_ENDPOINT_URL }}
+          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
+          use_https = True
+          EOF
+
+      - name: Determine version
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if [ -f VERSION ]; then
+            version=$(cat VERSION)
+          else
+            exit 1
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Upload runtimes to S3
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # get the path to the library file
+          library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
+          echo "Uploading $library_file to s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
