@@ -2,27 +2,27 @@
 
 set -e
 
-# DeepX Runtime configuration (default values)
-DX_RT_VERSION="2.9.5"
-DX_RT_DOWNLOAD_URL="https://developer.deepx.ai/?files=MjM1Ng=="
+# DeepX SDK configuration (default values)
+DX_COM_VERSION="1.60.1"
+DX_COM_DOWNLOAD_URL="https://developer.deepx.ai/?files=MjM2NA=="
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --expected-version)
-            DX_RT_VERSION="$2"
+            DX_COM_VERSION="$2"
             shift 2
             ;;
         --download-url)
-            DX_RT_DOWNLOAD_URL="$2"
+            DX_COM_DOWNLOAD_URL="$2"
             shift 2
             ;;
         --help)
             echo "Usage: $0 [--expected-version <version>] [--download-url <url>]"
             echo ""
             echo "Options:"
-            echo "  --expected-version <version>       Expected DX-RT version to download (default: 2.9.5)"
-            echo "  --download-url <url>      Download URL for DX-RT (default: https://developer.deepx.ai/?files=MjM1Ng==)"
+            echo "  --expected-version <version>       Expected DX-COM version to download (default: 1.60.1)"
+            echo "  --download-url <url>      Download URL for DX-COM (default: https://developer.deepx.ai/?files=MjM2NA==)"
             echo "  --help                    Show this help message"
             echo ""
             echo "Environment variables:"
@@ -38,10 +38,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "DeepX Runtime (DX-RT) Download Tool"
-echo "==================================="
-echo "Version: $DX_RT_VERSION"
-echo "Download URL: $DX_RT_DOWNLOAD_URL"
+echo "DeepX Compiler (DX-COM) Download Tool"
+echo "======================="
+echo "Version: $DX_COM_VERSION"
+echo "Download URL: $DX_COM_DOWNLOAD_URL"
 echo ""
 
 # Get credentials from environment variables or prompt user
@@ -70,20 +70,15 @@ fi
 
 cd "$(dirname "$0")" || exit 1
 
-# Clean up existing files
-rm -rf dx_rt-main.zip 2>/dev/null || true
-rm -rf dx_rt-main 2>/dev/null || true
-rm -rf dx_rt 2>/dev/null || true
+rm -rf artifacts 2&> /dev/null || true
+rm -rf calibration_dataset 2&> /dev/null || true
+rm -rf dx_com 2&> /dev/null || true
+rm -rf sample 2&> /dev/null || true
 
-# Download and extract DeepX Runtime using downloader.py
-echo "Downloading DX-RT v$DX_RT_VERSION using authenticated download..."
+mkdir artifacts
 
-# Check if downloader.py exists in scripts directory
-DOWNLOADER_SCRIPT="../scripts/downloader.py"
-if [[ ! -f "$DOWNLOADER_SCRIPT" ]]; then
-    echo "Error: downloader.py not found at $DOWNLOADER_SCRIPT"
-    exit 1
-fi
+# Download and extract DeepX SDK using downloader.py
+echo "Downloading DX-COM v$DX_COM_VERSION using authenticated download..."
 
 # Check if required Python packages are available
 if ! python3 -c "import requests, bs4" 2>/dev/null; then
@@ -97,14 +92,21 @@ TEMP_DOWNLOAD_DIR="temp_download"
 rm -rf "$TEMP_DOWNLOAD_DIR" 2>/dev/null || true
 mkdir -p "$TEMP_DOWNLOAD_DIR"
 
+# Ensure that downloader.py exists in scripts directory
+DOWNLOADER_SCRIPT="../scripts/downloader.py"
+if [[ ! -f "$DOWNLOADER_SCRIPT" ]]; then
+    echo "Error: downloader.py script not found in the 'scripts' directory in the parent directory"
+    exit 1
+fi
+
 # Download using downloader.py
 echo "Authenticating and downloading from DeepX developer portal..."
 if python3 "$DOWNLOADER_SCRIPT" \
     --username "$DX_USERNAME" \
     --password "$DX_PASSWORD" \
-    --download-url "$DX_RT_DOWNLOAD_URL" \
+    --download-url "$DX_COM_DOWNLOAD_URL" \
     --save-location "$TEMP_DOWNLOAD_DIR" \
-    --expected-version "$DX_RT_VERSION"; then
+    --expected-version "$DX_COM_VERSION"; then
     
     echo "Download completed successfully"
     
@@ -118,28 +120,47 @@ if python3 "$DOWNLOADER_SCRIPT" \
     echo "Found downloaded file: $DOWNLOADED_FILE"
     
     # Create extraction directory
-    EXTRACT_DIR="dx_rt_v${DX_RT_VERSION}_extract"
+    EXTRACT_DIR="dx_com_M1_v${DX_COM_VERSION}"
     echo "Creating extraction directory: $EXTRACT_DIR"
     rm -rf "$EXTRACT_DIR" 2>/dev/null || true
     mkdir "$EXTRACT_DIR"
     
-    echo "Extracting DX-RT file into $EXTRACT_DIR..."
+    echo "Extracting SDK file into $EXTRACT_DIR..."
     if tar -xzf "$DOWNLOADED_FILE" -C "$EXTRACT_DIR"; then
         echo "Extraction completed successfully"
         
-        # Organize extracted files - find and move dx_rt directory
+        # Organize extracted files - move required directories to root
         echo "Organizing extracted files..."
         
-        # Find dx_rt directory in extracted files
-        DX_RT_PATH=$(find "$EXTRACT_DIR" -type d -name "dx_rt" | head -1)
-        if [ -n "$DX_RT_PATH" ]; then
-            echo "Found dx_rt directory at: $DX_RT_PATH"
-            mv "$DX_RT_PATH" .
+        # Remove existing directories if they exist
+        rm -rf dx_com sample calibration_dataset 2>/dev/null || true
+        
+        # Find and move dx_com directory
+        DX_COM_PATH=$(find "$EXTRACT_DIR" -type d -name "dx_com" | head -1)
+        if [ -n "$DX_COM_PATH" ]; then
+            echo "Found dx_com directory at: $DX_COM_PATH"
+            mv "$DX_COM_PATH" .
         else
-            echo "Error: Could not find dx_rt directory in extracted files"
-            echo "Available directories:"
-            find "$EXTRACT_DIR" -type d -maxdepth 2
+            echo "Error: Could not find dx_com directory in extracted files"
             exit 1
+        fi
+        
+        # Find and move sample directory
+        SAMPLE_PATH=$(find "$EXTRACT_DIR" -type d -name "sample" | head -1)
+        if [ -n "$SAMPLE_PATH" ]; then
+            echo "Found sample directory at: $SAMPLE_PATH"
+            mv "$SAMPLE_PATH" .
+        else
+            echo "Warning: Could not find sample directory in extracted files"
+        fi
+        
+        # Find and move calibration_dataset directory
+        CALIB_PATH=$(find "$EXTRACT_DIR" -type d -name "calibration_dataset" | head -1)
+        if [ -n "$CALIB_PATH" ]; then
+            echo "Found calibration_dataset directory at: $CALIB_PATH"
+            mv "$CALIB_PATH" .
+        else
+            echo "Warning: Could not find calibration_dataset directory in extracted files"
         fi
         
         # Clean up extraction directory and temporary files
@@ -147,16 +168,14 @@ if python3 "$DOWNLOADER_SCRIPT" \
         rm -rf "$EXTRACT_DIR"
         rm -rf "$TEMP_DOWNLOAD_DIR"
         
-        echo "DX-RT installation completed successfully!"
-        echo "Installed component:"
-        echo "  - dx_rt/"
+        echo "File organization completed successfully"
         
     else
-        echo "Error: Failed to extract DX-RT file"
+        echo "Error: Failed to extract SDK file"
         exit 1
     fi
 else
-    echo "Error: Failed to download DX-RT using downloader.py"
+    echo "Error: Failed to download SDK using downloader.py"
     rm -rf "$TEMP_DOWNLOAD_DIR" 2>/dev/null || true
     exit 1
-fi 
+fi
