@@ -2,8 +2,11 @@ name: Build OAAX conversion toolchain
 
 on:
   push:
-    # branches:
-    #   - main
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build-toolchain:
@@ -29,7 +32,6 @@ jobs:
         run: ./conversion-toolchain/build-toolchain.sh
 
       - name: Configure s3cmd
-        if: github.ref == 'refs/heads/main'
         run: |
           cat > ~/.s3cfg <<EOF
           [default]
@@ -42,16 +44,18 @@ jobs:
           EOF
 
       - name: Determine version
-        if: github.ref == 'refs/heads/main'
         run: |
-          if [ -f VERSION ]; then
-            version=$(cat VERSION)
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            if [ -f VERSION ]; then
+              version=$(cat VERSION)
+            else
+              exit 1
+            fi
           else
-            exit 1
+            version=${{ github.head_ref }}
           fi
           echo "version=$version" >> $GITHUB_ENV
 
       - name: Upload Docker image to S3
-        if: github.ref == 'refs/heads/main'
         run: |
           s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/oaax-deepx-toolchain.tar"
