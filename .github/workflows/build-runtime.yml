@@ -2,8 +2,11 @@ name: Build OAAX runtimes
 
 on:
   push:
-    # branches:
-    #   - main
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build-runtime:
@@ -50,7 +53,6 @@ jobs:
           fi
 
       - name: Configure s3cmd
-        if: github.ref == 'refs/heads/main'
         run: |
           cat > ~/.s3cfg <<EOF
           [default]
@@ -63,17 +65,19 @@ jobs:
           EOF
 
       - name: Determine version
-        if: github.ref == 'refs/heads/main'
         run: |
-          if [ -f VERSION ]; then
-            version=$(cat VERSION)
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            if [ -f VERSION ]; then
+              version=$(cat VERSION)
+            else
+              exit 1
+            fi
           else
-            exit 1
+            version=${{ github.head_ref }}
           fi
           echo "version=$version" >> $GITHUB_ENV
 
       - name: Upload runtimes to S3
-        if: github.ref == 'refs/heads/main'
         run: |
           # get the path to the library file
           library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
