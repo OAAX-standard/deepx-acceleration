@@ -9,10 +9,6 @@ endif()
 # Common compiler flags
 add_compile_options(-W -Wall -pthread -fstrict-volatile-bitfields -fPIC)
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_options(-g -rdynamic)
-endif()
-
 # DXRT 
 find_package(dxrt REQUIRED)
 if(dxrt_FOUND)
@@ -61,6 +57,18 @@ target_link_libraries(RuntimeLibrary
         dxrt 
         pthread
 )
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-g -rdynamic)
+    add_compile_definitions("DEBUG")
+    # Link jpeg library
+    find_package(JPEG REQUIRED)
+    if(JPEG_FOUND)
+        target_link_libraries(RuntimeLibrary PRIVATE JPEG::JPEG)
+    else()
+        message(FATAL_ERROR "JPEG library not found!")
+    endif()
+endif()
 
 # Linker flags (basic flags, specific version compatibility should be handled by toolchain)
 set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--as-needed -Wl,--hash-style=gnu")

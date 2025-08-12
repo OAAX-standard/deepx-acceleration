@@ -92,7 +92,7 @@ RUN echo "===== Starting runtime_library build =====" && \
     mkdir -p /build_runtime && \
     cd /build_runtime && \
     # Configure with CMake
-    cmake -DCMAKE_BUILD_TYPE=Release \
+    cmake -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           /runtime_library && \
     # Build and install
