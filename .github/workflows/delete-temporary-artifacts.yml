@@ -27,11 +27,9 @@ jobs:
           use_https = True
           EOF
 
-      - name: Determine version
-        run: |
-          version=${{ github.head_ref }}
-
       - name: Delete runtimes and toolchain folders from S3
         run: |
-            s3cmd del --recursive "s3://oaax/runtime-library/${{ env.version }}/DEEPX/" || echo "Warning: No runtime-library found for version ${{ env.version }}"
-            s3cmd del --recursive "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${{ env.version }}"
+            version=${{ github.head_ref }}
+            echo "Deleting artifacts for version: ${version}"
+            s3cmd del --recursive "s3://oaax/runtime-library/${version}/DEEPX/" || echo "Warning: No runtime-library found for version ${version}"
+            s3cmd del --recursive "s3://oaax/conversion-toolchain/${version}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${version}"
