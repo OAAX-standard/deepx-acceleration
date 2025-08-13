@@ -258,9 +258,9 @@ static int runtime_inference_execution(tensors_struct *input_tensors)
 		// Save input image (NHWC) up to 100 images
 		if (saved_image_count < 100)
 		{
-			const size_t height = input_tensors->shapes[0][1];
-			const size_t width = input_tensors->shapes[0][2];
-			const size_t channels = input_tensors->shapes[0][3];
+			const size_t height = input_tensors->shapes[0][2];
+			const size_t width = input_tensors->shapes[0][3];
+			const size_t channels = input_tensors->shapes[0][1];
 			uint8_t *input_ptr = static_cast<uint8_t *>(input_tensors->data[0]);
 			saved_image_count++;
 			cv::Mat nhwc;
