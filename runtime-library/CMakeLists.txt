@@ -21,6 +21,14 @@ else()
     message(FATAL_ERROR "dxrt package not found!")
 endif()
 
+# OpenCV
+find_package(OpenCV REQUIRED)
+if(OpenCV_FOUND)
+    message(STATUS "OpenCV found: ${OpenCV_VERSION}")
+else()
+    message(FATAL_ERROR "OpenCV not found!")
+endif()
+
 # Add source files
 set(SOURCES
     src/runtime_core.cpp
@@ -53,6 +61,7 @@ target_include_directories(RuntimeLibrary
     PUBLIC 
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/tools/c-utilities/include
+        ${OpenCV_INCLUDE_DIRS}
 )
 
 # Link libraries
@@ -60,6 +69,7 @@ target_link_libraries(RuntimeLibrary
     PRIVATE 
         dxrt 
         pthread
+        ${OpenCV_LIBS}
 )
 
 # Linker flags (basic flags, specific version compatibility should be handled by toolchain)
