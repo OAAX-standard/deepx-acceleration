@@ -1,4 +1,8 @@
-# deepx-acceleration
+# DEEPX OAAX Implementation
+
+
+<img src="https://cdn.prod.website-files.com/6649422e9fd6f89e2b293704/6649422e9fd6f89e2b293710_logo.svg" alt="OAAX" width="49%" />
+<img src="./docs/images/image.png" alt="DeepX Acceleration" width="49%" />
 
 This repository contains the source code for building the implementation of the **conversion toolchain and runtime library for DeepX NPU acceleration**, based on the **OAAX standard**. 
 > If you're new to OAAX, you can find more information about the OAAX standard in the [OAAX repository](https://github.com/oaax-standard/OAAX)

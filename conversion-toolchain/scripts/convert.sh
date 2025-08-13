@@ -5,6 +5,12 @@ if [ "$#" -ne 2 ]; then
   exit 1
 fi
 
+# Ensure the dx_com directory exists
+if [ ! -d "./dx_com" ]; then
+  echo "Error: dx_com directory not found. Please download it, unpack it, then mount it into the Docker container at /app/dx_com." >&2
+  exit 1
+fi
+
 mkdir -p "$2"
 
 LOG_FILE="$2/convert.log"
