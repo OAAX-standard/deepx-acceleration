@@ -45,7 +45,7 @@ jobs:
 
       - name: Determine version
         run: |
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             if [ -f VERSION ]; then
               version=$(cat VERSION)
             else
