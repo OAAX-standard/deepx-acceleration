@@ -81,5 +81,7 @@ jobs:
         run: |
           # get the path to the library file
           library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
-          echo "Uploading $library_file to s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            s3cmd put "$library_file" "s3://oaax/runtimes/latest/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          fi
