@@ -47,9 +47,9 @@ jobs:
         run: |
           cd runtime-library
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }} --cross-aarch64
           else
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }}
           fi
 
       - name: Configure s3cmd

@@ -3,8 +3,8 @@
 set -e
 
 # DeepX SDK configuration (default values)
-DX_COM_VERSION="1.60.1"
-DX_COM_DOWNLOAD_URL="https://developer.deepx.ai/?files=MjM2NA=="
+DX_COM_VERSION="2.0.0"
+DX_COM_DOWNLOAD_URL="https://developer.deepx.ai/?files=MjQ1Mw=="
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -21,8 +21,8 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--expected-version <version>] [--download-url <url>]"
             echo ""
             echo "Options:"
-            echo "  --expected-version <version>       Expected DX-COM version to download (default: 1.60.1)"
-            echo "  --download-url <url>      Download URL for DX-COM (default: https://developer.deepx.ai/?files=MjM2NA==)"
+            echo "  --expected-version <version>       Expected DX-COM version to download (default: 2.0.0)"
+            echo "  --download-url <url>      Download URL for DX-COM (default: https://developer.deepx.ai/?files=MjQ1Mw==)"
             echo "  --help                    Show this help message"
             echo ""
             echo "Environment variables:"

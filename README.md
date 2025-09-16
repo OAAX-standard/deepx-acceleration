@@ -33,7 +33,7 @@ git submodule update --init --recursive
 The repository is organized into two main components:
 
 - **[`conversion-toolchain`](conversion-toolchain/)**:
-Contains the scripts and Docker setup for converting ONNX models into the DXNN (DeepX Neural Network) format using the DeepX compiler (`DX-COM`).
+Contains the scripts and Docker setup for converting ONNX models into the DXNN (DeepX Neural Network) format using the DeepX Compiler (`DX-COM`).
 
 - **[`runtime-library`](runtime-library/)**:
 Provides the source code and a Docker-based build system to generate the C++ runtime library (`libRuntimeLibrary.so`), which is responsible for loading and executing DXNN models on DeepX NPUs using the DeepX Runtime (`DX-RT`).
@@ -42,11 +42,11 @@ Provides the source code and a Docker-based build system to generate the C++ run
 
 ## Building the implementation
 
-You can build both the **conversion toolchain** and the **runtime library** independently using the provided shell scripts in each folder.  
+You can build both the **conversion-toolchain** and the **runtime-library** independently using the provided shell scripts in each folder.  
 Upon successful build, an `artifacts/` directory will be created in each component, containing:
 
-- **conversion toolchain**: Docker image archive for ONNX-to-DXNN conversion
-- **runtime library**: Shared library `libRuntimeLibrary.so` compiled for the target architectures and OS versions
+- **conversion-toolchain**: Docker image archive for ONNX-to-DXNN conversion
+- **runtime-library**: Shared library `libRuntimeLibrary.so` compiled for the target architectures and OS versions
 
 
 
@@ -58,8 +58,8 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 
 ## Compatibility
 
-- **Supported Chip**: DX-M1 
-- **Required DeepX Runtime (DX-RT) version**: Must match the version used during the build process
+- **Supported Chips**: DX-M1, DX-H1 
+- **Required DX-RT version**: Must match the version used during the runtime-library build process
 
 > The runtime-library is built inside a Docker environment that mimics the target architecture and OS version, with DeepX Runtime (DX-RT) preinstalled. Therefore, the resulting `libRuntimeLibrary.so` must be used in a runtime environment that matches the same architecture, OS version, and has the same DX-RT version installed.
 

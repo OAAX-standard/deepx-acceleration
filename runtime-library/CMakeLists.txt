@@ -24,7 +24,6 @@ endif()
 # Add source files
 set(SOURCES
     src/runtime_core.cpp
-    deps/tools/c-utilities/src/queue.c
     deps/tools/c-utilities/src/logger.c
     deps/tools/c-utilities/src/tensors_struct.c
 )
@@ -32,8 +31,6 @@ set(SOURCES
 # Add header files
 set(HEADERS
     include/runtime_core.h
-    include/concurrent_queue.h
-    deps/tools/c-utilities/include/queue.h
     deps/tools/c-utilities/include/logger.h
     deps/tools/c-utilities/include/tensors_struct.h
 )
