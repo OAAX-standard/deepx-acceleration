@@ -461,7 +461,7 @@ const char *runtime_error_message() {
 }
 
 const char *runtime_version() { 
-    return "2.0.0"; 
+    return OAAX_RUNTIME_VERSION; 
 }
 
 const char *runtime_name() { 

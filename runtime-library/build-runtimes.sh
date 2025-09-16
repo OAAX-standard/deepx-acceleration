@@ -170,6 +170,12 @@ build_in_docker() {
         docker rmi -f "$CONTAINER_NAME"
     fi
 
+    # Read oaax_runtime_version from VERSION file
+    if [[ ! -f "$SCRIPT_DIR/../VERSION" ]]; then
+        error_exit "VERSION file not found in $SCRIPT_DIR/../VERSION"
+    fi
+    OAAX_RUNTIME_VERSION=$(cat "$SCRIPT_DIR/../VERSION")
+
     # Build Docker image using current directory as context
     echo "===== Starting Docker image build ====="
     echo "Using Dockerfile: $DOCKERFILE"
@@ -178,6 +184,7 @@ build_in_docker() {
                  --network=host \
                  --progress=plain \
                  -f "$DOCKERFILE" \
+                 --build-arg OAAX_RUNTIME_VERSION="$OAAX_RUNTIME_VERSION" \
                  . || error_exit "Docker image build failed"
 
     # Extract libRuntimeLibrary.so

@@ -6,6 +6,9 @@ FROM ubuntu:${UBUNTU_VERSION}
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Read OAAX_RUNTIME_VERSION from VERSION file during build
+ARG OAAX_RUNTIME_VERSION
+
 # =============================================================================
 # System setup and package installation
 # =============================================================================
@@ -93,6 +96,7 @@ RUN echo "===== Starting runtime_library build =====" && \
     cd /build_runtime && \
     # Configure with CMake
     cmake -DCMAKE_BUILD_TYPE=Release \
+          -DOAAX_RUNTIME_VERSION=${OAAX_RUNTIME_VERSION} \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           /runtime_library && \
     # Build and install

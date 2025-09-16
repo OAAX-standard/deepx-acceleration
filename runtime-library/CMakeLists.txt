@@ -6,6 +6,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
 endif()
 
+# Read OAAX_VERSION from user-defined argument
+if(NOT DEFINED OAAX_RUNTIME_VERSION)
+    message(FATAL_ERROR "OAAX_RUNTIME_VERSION is not set. Please set it to the desired version.")
+endif()
+add_definitions(-DOAAX_RUNTIME_VERSION="${OAAX_RUNTIME_VERSION}")
+
 # Common compiler flags
 add_compile_options(-W -Wall -pthread -fstrict-volatile-bitfields -fPIC)
 

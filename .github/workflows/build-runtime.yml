@@ -37,8 +37,8 @@ jobs:
       - name: Download DX RT
         run: |
           cd runtime-library
-          DX_RT_VERSION="2.9.5"
-          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${DX_RT_VERSION}.zip
+          dxrt_version=$(cat ./dxrt_version.txt)
+          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${dxrt_version}.zip
           unzip v*.zip
           rm v*.zip
           mv dx_rt-* dx_rt

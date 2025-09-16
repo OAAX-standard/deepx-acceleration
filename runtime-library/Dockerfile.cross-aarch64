@@ -6,6 +6,9 @@ FROM ubuntu:${UBUNTU_VERSION}
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Read OAAX_RUNTIME_VERSION from VERSION file during build
+ARG OAAX_RUNTIME_VERSION
+
 # =============================================================================
 # System setup and package installation
 # =============================================================================
@@ -97,6 +100,7 @@ RUN echo "===== Starting runtime_library cross-compilation =====" && \
     cd /build_runtime && \
     # Configure with CMake for cross-compilation
     cmake -DCMAKE_BUILD_TYPE=Release \
+          -DOAAX_RUNTIME_VERSION=${OAAX_RUNTIME_VERSION} \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           -DCMAKE_SYSTEM_NAME=Linux \
           -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
