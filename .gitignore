@@ -1,5 +1,6 @@
 dx_rt/
 images/
+!docs/images/
 
 # DEEPX proprietary files
 temp_download/

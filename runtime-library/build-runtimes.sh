@@ -14,15 +14,15 @@ error_exit() {
 # Print usage
 show_usage() {
     cat << EOF
-Usage: $0 --os <ubuntu_version> [--cross-aarch64] [--crt]
-  --os:           (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
+Usage: $0 --ubuntu_version <ubuntu_version> [--cross-aarch64] [--crt]
+  --ubuntu_version:           (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
   --cross-aarch64: (Optional) Cross-compile for aarch64 (only supported on x86_64 hosts)
   --crt:          (Optional) Use SSL certificate (only required for DEEPX internal builds)
   -h, --help:     Show this help message
 
 Examples:
-  $0 --os 22.04                         # Build for host architecture
-  $0 --os 22.04 --cross-aarch64         # Cross-compile for aarch64 (x86_64 host only)
+  $0 --ubuntu_version 22.04                         # Build for host architecture
+  $0 --ubuntu_version 22.04 --cross-aarch64         # Cross-compile for aarch64 (x86_64 host only)
 EOF
     exit 1
 }
@@ -90,7 +90,7 @@ disable_dxrt_python_option
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --os) UBUNTU_VERSION="$2"; shift 2 ;;
+        --ubuntu_version) UBUNTU_VERSION="$2"; shift 2 ;;
         --cross-aarch64) CROSS_AARCH64=true; shift ;;
         --crt) USE_CRT=true; shift ;;
         -h|--help) show_usage ;;
@@ -99,7 +99,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required arguments
-[[ -z "$UBUNTU_VERSION" ]] && error_exit "--os argument is required"
+[[ -z "$UBUNTU_VERSION" ]] && error_exit "--ubuntu_version argument is required"
 
 # Validate Ubuntu version
 if [[ ! " ${SUPPORTED_UBUNTU_VERSIONS[*]} " =~ " ${UBUNTU_VERSION} " ]]; then
@@ -170,6 +170,12 @@ build_in_docker() {
         docker rmi -f "$CONTAINER_NAME"
     fi
 
+    # Read oaax_runtime_version from VERSION file
+    if [[ ! -f "$SCRIPT_DIR/../VERSION" ]]; then
+        error_exit "VERSION file not found in $SCRIPT_DIR/../VERSION"
+    fi
+    OAAX_RUNTIME_VERSION=$(cat "$SCRIPT_DIR/../VERSION")
+
     # Build Docker image using current directory as context
     echo "===== Starting Docker image build ====="
     echo "Using Dockerfile: $DOCKERFILE"
@@ -178,6 +184,7 @@ build_in_docker() {
                  --network=host \
                  --progress=plain \
                  -f "$DOCKERFILE" \
+                 --build-arg OAAX_RUNTIME_VERSION="$OAAX_RUNTIME_VERSION" \
                  . || error_exit "Docker image build failed"
 
     # Extract libRuntimeLibrary.so

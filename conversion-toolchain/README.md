@@ -5,21 +5,24 @@ This toolchain converts ONNX models to DeepX Neural Network (DXNN) format for de
 ---
 ## Overview
 
-The DeepX conversion toolchain consists of **three main phases**:
+The DeepX conversion toolchain consists of **four main phases**:
 
-1. **Docker Image Build**  
-   Creates a containerized environment with the DeepX compiler (DX-COM).
+1. **DX-COM Setup**  
+   Downloads and unpacks the DeepX compiler (DX-COM) required for conversion.
 
-2. **Model Preparation**  
+2. **Docker Image Build**  
+   Creates a containerized environment.
+
+3. **Model Preparation**  
    Packages your ONNX model, JSON configuration file, and calibration dataset into a ZIP archive.
 
-3. **Model Conversion**  
-   Converts the packaged ONNX model to DXNN format using the DX-COM inside the Docker container.
+4. **Model Conversion**  
+   Converts the packaged ONNX model to DXNN format using the DX-COM in the Docker container.
 
 ---
 ## Getting Started
 
-### Step 1: Download DEEPX's DX-COM
+### Step 1: Install DX-COM
 
 The first step is to download the DeepX compiler (DX-COM) package using the provided script and unpack it into the `dx_com/` directory. This package is required for converting ONNX models to DXNN format.
 
@@ -35,19 +38,18 @@ DX_USERNAME="your_username" DX_PASSWORD="your_password" ./setup-dx_com.sh
 ```
 > ⚠️ **Authentication Required**: You need a [DeepX Developer Portal](https://developer.deepx.ai/) account to download DX-COM. 
 > - The script will prompt for credentials if not provided via environment variables
-> - For CI/CD workflows, use environment variables `DX_USERNAME` and `DX_PASSWORD`
 
 ##### **Specifying expected version and download URL:**
 ```bash
-./setup-dx_com.sh --expected-version "1.60.1" --download-url "https://developer.deepx.ai/?files=MjM2NA=="
+./setup-dx_com.sh --expected-version "2.0.0" --download-url "https://developer.deepx.ai/?files=MjQ1Mw=="
 ```
 
 ###### Command Line Options
 
-- `--expected-version <version>`: Specify the DX-COM version string expected in the downloaded filename (default: 1.60.1).
+- `--expected-version <version>`: Specify the DX-COM version string expected in the downloaded filename (default: 2.0.0).
 This value must match the version string in the downloaded archive filename.
 **If the version does not match, the download will be considered failed**.
-- `--download-url <url>`: Specify download URL for DX-COM (default: https://developer.deepx.ai/?files=MjM2NA==)
+- `--download-url <url>`: Specify download URL for DX-COM (default: https://developer.deepx.ai/?files=MjQ1Mw==)
 - `--help`: Show help message with all available options
 
 #### Setup Output
@@ -56,7 +58,9 @@ After successful execution of `setup-dx_com.sh`, you'll find the following:
 
 - `dx_com/` - DeepX compiler files extracted from the downloaded package
 - `sample/` - Example ONNX models and configuration files for testing
-- `calibration_dataset/` - Sample calibration dataset for quantization
+- `calibration_dataset/` - Sample calibration dataset for quantization  
+  
+---
 
 ### Step 2: Build the Docker Image
 
@@ -65,11 +69,15 @@ The second step is to build the Docker image that performs the conversion from O
 > ⚠️ **Prerequisites**: 
 > - Docker must be installed on your system
 
+#### Example
+```bash
+./build-toolchain.sh
+```
 #### Build Process
 
 1. **Copies** the [convert.sh](scripts/convert.sh) entrypoint script into the Docker image  
-3. **Builds** the Docker environment using the provided [Dockerfile](Dockerfile)
-4. **Saves** the resulting Docker image as a `.tar` archive in the `artifacts/` directory
+2. **Builds** the Docker environment using the provided [Dockerfile](Dockerfile)
+3. **Saves** the resulting Docker image as a `.tar` archive in the `artifacts/` directory
 
 > 💡 The Docker image is tagged as both `oaax-deepx-toolchain:{version}` and `oaax-deepx-toolchain:latest`
 
@@ -77,7 +85,9 @@ The second step is to build the Docker image that performs the conversion from O
 
 After successful execution of `build-toolchain.sh`, you'll find the Docker image archive ready for use in the `artifacts/` directory: `artifacts/oaax-deepx-toolchain.tar`
 
-### Step 2: Prepare Your Model
+---
+
+### Step 3: Prepare Your Model
 
 Before conversion, package your ONNX model into a `.zip` archive following the required format:
 
@@ -115,7 +125,7 @@ In addition to the `sample/` directory, a `calibration_dataset/` directory is al
 - **Impact**: Not including a calibration dataset may result in degraded performance of the DXNN model
 
 #### Example
-The following steps use a sample YOLOv5 model along with its calibration dataset to create a zip archive named `YOLOV5-1.zip` under the `artifacts/` directory.
+The following steps use a sample YOLOv5 ONNX model along with its JSON configuration file and calibration dataset to create a ZIP archive named `YOLOV5-1.zip` under the `artifacts/` directory.
    ```
    mkdir -p temp_zip
    cp sample/YOLOV5-1.onnx temp_zip/
@@ -127,21 +137,21 @@ The following steps use a sample YOLOv5 model along with its calibration dataset
    cd ..
    rm -rf temp_zip
    ```
-> ⚠️ **Note**: Be sure to use `*` instead of `.` in the `zip` command.
+> ⚠️ **Note**: Be sure to use `*` instead of `.` in the `zip` command.  
 Using `.` will include the current directory itself in the archive, resulting in an incorrect structure, which may break the converter.
 
+---
 
+### Step 4: Run Model Conversion
 
-### Step 3: Run Model Conversion
-
-Once the Docker image is built and your model is prepared, you can convert your ONNX model to DXNN format.
+Once the Docker image is built and your model is prepared as a `.zip` archive, you can convert your ONNX model to DXNN format.
 
 #### Example
 ```bash
 docker run -v ./artifacts:/app/artifacts -v ./dx_com:/app/dx_com oaax-deepx-toolchain:latest /app/artifacts/YOLOV5-1.zip /app/artifacts
 ```
-> ⚠️ **Note**: The file `YOLOV5-1.zip` must exist under the `./artifacts` directory.
-Refer to the example command in Step 2 for how to generate this file.
+> ⚠️ **Note**: The file `YOLOV5-1.zip` must exist under the `./artifacts` directory.  
+Refer to the example command in Step 3 for how to generate this file.
 
 ######  Command Breakdown
 - `-v ./artifacts:/app/artifacts`: Mounts the `artifacts/` directory from the host machine to `/app/artifacts` inside the Docker container
@@ -154,7 +164,7 @@ Refer to the example command in Step 2 for how to generate this file.
 
 1. **File Extraction**: The ZIP file is extracted to access ONNX and JSON files
 2. **Validation**: Checks for exactly one ONNX file and one JSON file
-3. **Compilation**: Uses `dx_com` to convert ONNX to DXNN format
+3. **Compilation**: Uses DX-COM to convert ONNX to DXNN format
 4. **Output Generation**: Creates the converted model and log files
 
 #### Conversion Output

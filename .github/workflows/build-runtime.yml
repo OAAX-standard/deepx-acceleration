@@ -37,8 +37,8 @@ jobs:
       - name: Download DX RT
         run: |
           cd runtime-library
-          DX_RT_VERSION="2.9.5"
-          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${DX_RT_VERSION}.zip
+          dxrt_version=$(cat ./dxrt_version.txt)
+          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${dxrt_version}.zip
           unzip v*.zip
           rm v*.zip
           mv dx_rt-* dx_rt
@@ -47,9 +47,9 @@ jobs:
         run: |
           cd runtime-library
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }} --cross-aarch64
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }} --cross-aarch64
           else
-            ./build-runtimes.sh --os ${{ matrix.ubuntu_version }}
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }}
           fi
 
       - name: Configure s3cmd

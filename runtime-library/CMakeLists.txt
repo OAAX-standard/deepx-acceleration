@@ -6,6 +6,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
 endif()
 
+# Read OAAX_VERSION from user-defined argument
+if(NOT DEFINED OAAX_RUNTIME_VERSION)
+    message(FATAL_ERROR "OAAX_RUNTIME_VERSION is not set. Please set it to the desired version.")
+endif()
+add_definitions(-DOAAX_RUNTIME_VERSION="${OAAX_RUNTIME_VERSION}")
+
 # Common compiler flags
 add_compile_options(-W -Wall -pthread -fstrict-volatile-bitfields -fPIC)
 
@@ -24,7 +30,6 @@ endif()
 # Add source files
 set(SOURCES
     src/runtime_core.cpp
-    deps/tools/c-utilities/src/queue.c
     deps/tools/c-utilities/src/logger.c
     deps/tools/c-utilities/src/tensors_struct.c
 )
@@ -32,8 +37,6 @@ set(SOURCES
 # Add header files
 set(HEADERS
     include/runtime_core.h
-    include/concurrent_queue.h
-    deps/tools/c-utilities/include/queue.h
     deps/tools/c-utilities/include/logger.h
     deps/tools/c-utilities/include/tensors_struct.h
 )

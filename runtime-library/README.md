@@ -49,16 +49,18 @@ Available versions can be found in the [DX-RT releases page](https://github.com/
 
 ### Basic Usage
 
-#### Native Build (Host Architecture)
+#### Build for the host architecture
+Builds a runtime library for the same architecture as your host machine. Works on both x86_64 and aarch64 hosts.
 ```bash
-# Build for Ubuntu 22.04 on the host architecture (x86_64 or aarch64)
-./build-runtimes.sh --os 22.04
+# Example: build for Ubuntu 22.04 matching the host architecture
+./build-runtimes.sh --ubuntu_version 22.04
 ```
 
-#### Cross-Compilation (x86_64 → aarch64)
+#### Cross-compile aarch64 on an x86_64 host
+Builds an aarch64 runtime library on an x86_64 host. Not supported in the reverse direction (aarch64 host → x86_64 target).
 ```bash
-# Cross-compile for aarch64 Ubuntu 22.04 (x86_64 host only)
-./build-runtimes.sh --os 22.04 --cross-aarch64
+# Example: cross-compile aarch64 for Ubuntu 22.04 (x86_64 host only)
+./build-runtimes.sh --ubuntu_version 22.04 --cross-aarch64
 ```
 
 ### Artifacts
