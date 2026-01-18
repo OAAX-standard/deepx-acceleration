@@ -12,37 +12,56 @@ if(NOT DEFINED OAAX_RUNTIME_VERSION)
 endif()
 add_definitions(-DOAAX_RUNTIME_VERSION="${OAAX_RUNTIME_VERSION}")
 
-# Common compiler flags
-add_compile_options(-W -Wall -pthread -fstrict-volatile-bitfields -fPIC)
+# Common compiler flags (platform-specific)
+if (UNIX)
+    add_compile_options(-W -Wall -fstrict-volatile-bitfields -fPIC)
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_options(-g -rdynamic)
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        add_compile_options(-g -rdynamic)
+    endif()
+elseif (WIN32)
+    # Enable UTF-8 source/diagnostics on MSVC (required by spdlog/fmt)
+    add_compile_options(/utf-8)
 endif()
 
-# DXRT 
-find_package(dxrt REQUIRED)
-if(dxrt_FOUND)
-    message(STATUS "dxrt package found!")
+# DXRT
+if (WIN32)
+    # On Windows, dx_rt is provided as a prebuilt SDK; use DXRT_ROOT to locate it
+    set(DXRT_ROOT "" CACHE PATH "Path to DX-RT Windows SDK (must contain include/ and lib/)")
+    if (NOT DXRT_ROOT)
+        message(FATAL_ERROR "DXRT_ROOT is not set. Please configure it with -DDXRT_ROOT=PATH to the DX-RT Windows SDK.")
+    endif()
+    # Silence MSVC "unsafe" CRT and POSIX name deprecation warnings for third-party C utilities
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
 else()
-    message(FATAL_ERROR "dxrt package not found!")
+    find_package(dxrt REQUIRED)
+    if(dxrt_FOUND)
+        message(STATUS "dxrt package found!")
+    else()
+        message(FATAL_ERROR "dxrt package not found!")
+    endif()
 endif()
+
+# Threads (for std::thread/std::condition_variable)
+find_package(Threads REQUIRED)
 
 # Add source files
 set(SOURCES
     src/runtime_core.cpp
-    deps/tools/c-utilities/src/logger.c
-    deps/tools/c-utilities/src/tensors_struct.c
+    deps/src/tensors_struct.c
 )
 
 # Add header files
 set(HEADERS
     include/runtime_core.h
-    deps/tools/c-utilities/include/logger.h
-    deps/tools/c-utilities/include/tensors_struct.h
+    deps/include/tensors_struct.h
 )
 
 # Create shared library
 add_library(RuntimeLibrary SHARED ${SOURCES} ${HEADERS})
+
+# Define export macro when building the library (used by runtime_core.h)
+target_compile_definitions(RuntimeLibrary PRIVATE RUNTIME_LIBRARY_EXPORTS)
 
 # Set C++ standard
 set_target_properties(RuntimeLibrary PROPERTIES
@@ -55,18 +74,35 @@ set_target_properties(RuntimeLibrary PROPERTIES
 target_include_directories(RuntimeLibrary 
     PUBLIC 
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/deps/tools/c-utilities/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/include
 )
+
+if (WIN32)
+    target_include_directories(RuntimeLibrary
+        PRIVATE
+            ${DXRT_ROOT}/include
+    )
+endif()
 
 # Link libraries
 target_link_libraries(RuntimeLibrary 
     PRIVATE 
         dxrt 
-        pthread
+        Threads::Threads
 )
 
+if (WIN32)
+    # Link against dxrt.lib from the SDK
+    target_link_directories(RuntimeLibrary
+        PRIVATE
+            ${DXRT_ROOT}/lib
+    )
+endif()
+
 # Linker flags (basic flags, specific version compatibility should be handled by toolchain)
-set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--as-needed -Wl,--hash-style=gnu")
+if (UNIX)
+    set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--as-needed -Wl,--hash-style=gnu")
+endif()
 
 # Install rules
 install(TARGETS RuntimeLibrary
@@ -78,4 +114,10 @@ install(TARGETS RuntimeLibrary
 install(DIRECTORY include/
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
+)
+
+# Install auxiliary public headers that live under deps/include
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/include/tensors_struct.h
+    DESTINATION include
 )

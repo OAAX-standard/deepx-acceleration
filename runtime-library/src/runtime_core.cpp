@@ -1,7 +1,6 @@
 #include "runtime_core.h"
 
 extern "C" {
-#include "logger.h"
 #include "tensors_struct.h"
 }
 
@@ -13,9 +12,12 @@ extern "C" {
 #include <atomic>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <pthread.h>
+#include <thread>
+#include <fstream>
+
 #include <dxrt/dxrt_api.h>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 struct JobData {
     int job_id;
@@ -24,8 +26,7 @@ struct JobData {
     std::vector<std::shared_ptr<dxrt::Tensor>> dxrt_outputs;
 };
 
-static Logger *logger = nullptr;
-static LogLevel log_level = LOG_INFO;
+static std::shared_ptr<spdlog::logger> logger;
 
 static dxrt::InferenceEngine *inference_engine = nullptr;
 static std::vector<uint64_t> OutputTensorSizes;
@@ -45,12 +46,12 @@ static std::condition_variable output_queue_cv;
 
 static std::atomic<bool> stop_wait_thread{false};
 static std::atomic<bool> wait_thread_started{false};
-static pthread_t wait_thread;
+static std::thread wait_thread;
 
 static tensors_struct *create_output_tensors_struct();
 static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vector<std::shared_ptr<dxrt::Tensor>> &outputs, tensors_struct *output_tensors);
 static tensor_data_type mapDataTypeToTensorDataType(dxrt::DataType dtype);
-static void *wait_loop(void *arg);
+static void wait_loop();
 
 static tensors_struct *create_output_tensors_struct() {
     int num_tensors = OutputTensorSizes.size();
@@ -126,8 +127,8 @@ static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vec
         return nullptr;
     }
     if (num_output_tensors == 0 || output_tensors->num_tensors != num_output_tensors) {
-        log_error(logger, "Output tensor size mismatch: dxrt_outputs=%zu, output_tensors_struct=%zu",
-                  num_output_tensors, output_tensors->num_tensors);
+        spdlog::error("Output tensor size mismatch: dxrt_outputs={}, output_tensors_struct={}",
+                      num_output_tensors, output_tensors->num_tensors);
         return nullptr;
     }
     
@@ -141,7 +142,7 @@ static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vec
         
         output_tensors->names[i] = strdup(name.c_str());
         if (!output_tensors->names[i]) {
-            log_error(logger, "Failed to allocate name for tensor %zu", i);
+            spdlog::error("Failed to allocate name for tensor {}", i);
             deep_free_tensors_struct(output_tensors);
             return nullptr;
         }
@@ -149,7 +150,7 @@ static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vec
         output_tensors->ranks[i] = shape.size();
         output_tensors->shapes[i] = (size_t *)malloc(shape.size() * sizeof(size_t));
         if (!output_tensors->shapes[i]) {
-            log_error(logger, "Failed to allocate shape for tensor %zu", i);
+            spdlog::error("Failed to allocate shape for tensor {}", i);
             deep_free_tensors_struct(output_tensors);
             return nullptr;
         }
@@ -191,12 +192,13 @@ static tensor_data_type mapDataTypeToTensorDataType(dxrt::DataType dtype) {
 }
 
 int runtime_initialization() {
-    
-    logger = create_logger(runtime_name(), "runtime.log", log_level, LOG_INFO);
-    if (logger == nullptr) {
-        printf("Warning: Failed to create logger, continuing without file logging\n");
-    } else {
-        log_info(logger, "Initializing the runtime environment");
+    try {
+        logger = spdlog::basic_logger_mt(runtime_name(), "runtime.log");
+        spdlog::set_default_logger(logger);
+        spdlog::set_level(spdlog::level::info);
+        spdlog::info("Initializing the runtime environment");
+    } catch (const spdlog::spdlog_ex &ex) {
+        printf("Warning: Failed to create logger: %s, continuing without file logging\n", ex.what());
     }
 
     return 0;
@@ -210,26 +212,29 @@ int runtime_initialization_with_args(int length, const char **keys, const void *
         return ret;
     }
 
-    log_info(logger, "Runtime initialized with arguments");
+    spdlog::info("Runtime initialized with arguments");
     for (int i = 0; i < length; i++) {
-        log_debug(logger, "Using Key: %s", keys[i]);
+        spdlog::debug("Using Key: {}", keys[i]);
     }
 
     return 0;
 }
 
 int runtime_model_loading(const char *file_path) {
-    if (access(file_path, F_OK) != 0) {
-        log_error(logger, "Model file does not exist: %s", file_path);
-        return 1;
+    {
+        std::ifstream f(file_path, std::ios::binary);
+        if (!f) {
+            spdlog::error("Model file does not exist: {}", file_path);
+            return 1;
+        }
     }
 
-    log_info(logger, "Loading model from: %s", file_path);
+    spdlog::info("Loading model from: {}", file_path);
 
     try {
         inference_engine = new dxrt::InferenceEngine(std::string(file_path));
         if (inference_engine == nullptr) {
-            log_error(logger, "Failed to create inference engine");
+            spdlog::error("Failed to create inference engine");
             return 1;
         }
 
@@ -241,7 +246,7 @@ int runtime_model_loading(const char *file_path) {
             for (size_t i = 0; i < OUTPUTS_POOL_CAPACITY; ++i) {
                 void* outputs_ptr = malloc(OutputSize);
                 if (!outputs_ptr) {
-                    log_error(logger, "Failed to allocate output buffer %zu", i);
+                    spdlog::error("Failed to allocate output buffer {}", i);
                     continue;
                 }
                 outputs_ptr_pool.push(outputs_ptr);
@@ -250,8 +255,11 @@ int runtime_model_loading(const char *file_path) {
         outputs_pool_cv.notify_one();
 
         stop_wait_thread.store(false);
-        if (pthread_create(&wait_thread, NULL, wait_loop, NULL) != 0) {
-            log_error(logger, "Failed to create wait thread");
+        try {
+            wait_thread = std::thread(wait_loop);
+            wait_thread_started.store(true);
+        } catch (...) {
+            spdlog::error("Failed to create wait thread");
             {
                 std::lock_guard<std::mutex> lock(outputs_pool_mutex);
                 while (!outputs_ptr_pool.empty()) {
@@ -259,14 +267,13 @@ int runtime_model_loading(const char *file_path) {
                     outputs_ptr_pool.pop();
                 }
             }
-            if (inference_engine) {delete inference_engine; inference_engine = nullptr;}
+            if (inference_engine) { delete inference_engine; inference_engine = nullptr; }
             return 1;
         }
-        wait_thread_started.store(true);
 
         return 0;
     } catch (const std::exception& e) {
-        log_error(logger, "Failed to load model: %s", e.what());
+        spdlog::error("Failed to load model: {}", e.what());
         return 1;
     }
 }
@@ -274,7 +281,7 @@ int runtime_model_loading(const char *file_path) {
 int send_input(tensors_struct *input_tensors) {
 
     if (input_tensors->num_tensors != 1) {
-        log_error(logger, "[send_input] Invalid number of input tensors: %d", input_tensors->num_tensors);
+        spdlog::error("[send_input] Invalid number of input tensors: {}", input_tensors->num_tensors);
         return 1;
     }
     
@@ -290,7 +297,7 @@ int send_input(tensors_struct *input_tensors) {
     try {
         job_id = inference_engine->RunAsync(static_cast<uint8_t *>(input_tensors->data[0]), nullptr, outputs_ptr);
     } catch (const std::exception& e) {
-        log_error(logger, "[send_input] Failed to run inference : %s", e.what());
+        spdlog::error("[send_input] Failed to run inference : {}", e.what());
         {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(outputs_ptr);
@@ -314,8 +321,7 @@ int send_input(tensors_struct *input_tensors) {
     return 0;
 }
 
-static void *wait_loop(void *arg) {
-    (void)arg;
+static void wait_loop() {
     while (true) {
         JobData job_data{};
         {
@@ -331,7 +337,7 @@ static void *wait_loop(void *arg) {
         try {
             job_data.dxrt_outputs = inference_engine->Wait(job_data.job_id);
         } catch (...) {
-            log_error(logger, "[wait_loop] Failed to wait for outputs. job_id: %d", job_data.job_id);
+            spdlog::error("[wait_loop] Failed to wait for outputs. job_id: {}", job_data.job_id);
             if (job_data.input_tensors) deep_free_tensors_struct(job_data.input_tensors);
             if (job_data.outputs_ptr) {
                 std::lock_guard<std::mutex> lock(outputs_pool_mutex);
@@ -349,7 +355,6 @@ static void *wait_loop(void *arg) {
             output_queue_cv.notify_one();
         }
     }
-    return nullptr;
 }
 
 int receive_output(tensors_struct **output_tensors) {
@@ -368,7 +373,7 @@ int receive_output(tensors_struct **output_tensors) {
 
     tensors_struct *output_tensors_struct = create_output_tensors_struct();
     if (!output_tensors_struct) {
-        log_error(logger, "[receive_output] Failed to allocate output tensors");
+        spdlog::error("[receive_output] Failed to allocate output tensors");
         if (job_data.outputs_ptr) {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(job_data.outputs_ptr);
@@ -380,7 +385,7 @@ int receive_output(tensors_struct **output_tensors) {
 
     *output_tensors = copy_dxrt_outputs_to_output_tensors_struct(job_data.dxrt_outputs, output_tensors_struct);
     if (*output_tensors == nullptr) {
-        log_error(logger, "[receive_output] Failed to convert dxrt outputs to output tensors");
+        spdlog::error("[receive_output] Failed to convert dxrt outputs to output tensors");
         if (job_data.outputs_ptr) {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(job_data.outputs_ptr);
@@ -399,7 +404,7 @@ int receive_output(tensors_struct **output_tensors) {
 }
 
 int runtime_destruction() {
-    log_info(logger, "Destroying the runtime environment");
+    spdlog::info("Destroying the runtime environment");
 
     stop_wait_thread.store(true);
     job_data_queue_cv.notify_all();
@@ -436,21 +441,22 @@ int runtime_destruction() {
     }
 
     if (wait_thread_started.load()) {
-        pthread_join(wait_thread, NULL);
+        if (wait_thread.joinable()) {
+            wait_thread.join();
+        }
         wait_thread_started.store(false);
     }
 
     if (inference_engine != nullptr) {
         delete inference_engine;
         inference_engine = nullptr;
-        log_info(logger, "Inference engine destroyed");
+        spdlog::info("Inference engine destroyed");
     }
 
-    log_info(logger, "Runtime destruction completed");
-
-    if (logger != nullptr) {
-        close_logger(logger);
-        logger = nullptr;
+    spdlog::info("Runtime destruction completed");
+    if (logger) {
+        logger->flush();
+        logger.reset();
     }
 
     return 0;

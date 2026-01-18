@@ -14,16 +14,10 @@ Please check it out first to gain a high-level understanding of how an OAAX-comp
 
 ## Getting Started
 
-This project uses Git submodules for the [tools](https://github.com/OAAX-standard/tools) dependency. When cloning the repository, it is recommended to use the `--recursive` option to automatically initialize and update the submodules:
+To clone the repository:
 
 ```bash
-git clone --recursive https://github.com/OAAX-standard/deepx-acceleration.git
-```
-
-If you have already cloned the repository without the `--recursive` option, you can initialize the submodules manually:
-
-```bash
-git submodule update --init --recursive
+git clone https://github.com/OAAX-standard/deepx-acceleration.git
 ```
 
 ---
@@ -36,7 +30,7 @@ The repository is organized into two main components:
 Contains the scripts and Docker setup for converting ONNX models into the DXNN (DeepX Neural Network) format using the DeepX Compiler (`DX-COM`).
 
 - **[`runtime-library`](runtime-library/)**:
-Provides the source code and a Docker-based build system to generate the C++ runtime library (`libRuntimeLibrary.so`), which is responsible for loading and executing DXNN models on DeepX NPUs using the DeepX Runtime (`DX-RT`).
+Provides the source code and build system (Docker-based for Linux, native CMake/Visual Studio on Windows) to generate the C++ runtime library (`libRuntimeLibrary.so` / `RuntimeLibrary.dll`), which is responsible for loading and executing DXNN models on DeepX NPUs using the DeepX Runtime (`DX-RT`).
 
 ---
 
@@ -46,7 +40,9 @@ You can build both the **conversion-toolchain** and the **runtime-library** inde
 Upon successful build, an `artifacts/` directory will be created in each component, containing:
 
 - **conversion-toolchain**: Docker image archive for ONNX-to-DXNN conversion
-- **runtime-library**: Shared library `libRuntimeLibrary.so` compiled for the target architectures and OS versions
+- **runtime-library**: Shared libraries compiled for the target architectures and operating systems
+	- Linux targets: `libRuntimeLibrary.so`
+	- Windows targets: `RuntimeLibrary.dll`
 
 
 
@@ -61,14 +57,16 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 - **Supported Chips**: DX-M1, DX-H1 
 - **Required DX-RT version**: Must match the version used during the runtime-library build process
 
-> The runtime-library is built inside a Docker environment that mimics the target architecture and OS version, with DeepX Runtime (DX-RT) preinstalled. Therefore, the resulting `libRuntimeLibrary.so` must be used in a runtime environment that matches the same architecture, OS version, and has the same DX-RT version installed.
+> On Linux, the runtime-library is built inside a Docker environment that mimics the target architecture and OS version, with DeepX Runtime (DX-RT) preinstalled. Therefore, the resulting `libRuntimeLibrary.so` must be used in a runtime environment that matches the same architecture, OS version, and has the same DX-RT version installed.
+>
+> On Windows, the runtime-library is built natively using CMake and Visual Studio against the DX-RT Windows SDK. The resulting `RuntimeLibrary.dll` must be used with a matching DX-RT Windows SDK version.
 
 ---
 
 ## Limitations
 
-- Currently, **only Ubuntu-based builds are supported** (20.04, 22.04, and 24.04).
-- **Windows build is not supported** at this time.
+- **Linux builds**: Currently supported for Ubuntu-based targets (20.04, 22.04, and 24.04).
+- **Windows builds**: Supported for x86_64 using Visual Studio 2022 and the DX-RT Windows SDK.
 
 ---
 
