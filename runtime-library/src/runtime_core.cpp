@@ -31,7 +31,9 @@ static std::shared_ptr<spdlog::logger> logger;
 static dxrt::InferenceEngine *inference_engine = nullptr;
 static std::vector<uint64_t> OutputTensorSizes;
 
-static const size_t OUTPUTS_POOL_CAPACITY = 10;
+static size_t OUTPUTS_POOL_CAPACITY = 0;
+static size_t NumDevice = 0;
+
 static std::queue<void*> outputs_ptr_pool;
 static std::mutex outputs_pool_mutex;
 static std::condition_variable outputs_pool_cv;
@@ -238,6 +240,9 @@ int runtime_model_loading(const char *file_path) {
             return 1;
         }
 
+        NumDevice = dxrt::DeviceStatus::GetDeviceCount();
+        OUTPUTS_POOL_CAPACITY = NumDevice * 10;
+
         OutputTensorSizes = inference_engine->GetOutputTensorSizes();
         uint64_t OutputSize = inference_engine->GetOutputSize();
         {
@@ -251,6 +256,7 @@ int runtime_model_loading(const char *file_path) {
                 }
                 outputs_ptr_pool.push(outputs_ptr);
             }
+            spdlog::info("Initialized outputs_ptr_pool with {} buffers for {} devices", outputs_ptr_pool.size(), NumDevice);
         }
         outputs_pool_cv.notify_one();
 
