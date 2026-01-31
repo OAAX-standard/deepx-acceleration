@@ -72,4 +72,35 @@ if (-not (Test-Path $dllSourcePath)) {
 
 Copy-Item $dllSourcePath -Destination $artifactsDir -Force
 
+# Read DXRT version from dxrt_version.txt file
+$dxrtVersionFile = Join-Path $PSScriptRoot "dxrt_version.txt"
+$dxrtVersion = $null
+if (Test-Path $dxrtVersionFile) {
+    $dxrtVersion = (Get-Content $dxrtVersionFile -Raw).Trim()
+    Write-Host "DX-RT version read from dxrt_version.txt: $dxrtVersion"
+} else {
+    Write-Warning "DX-RT dxrt_version.txt file not found at $dxrtVersionFile. Using 'unknown' as version."
+    $dxrtVersion = "unknown"
+}
+
+# Compress the DLL into a tar.gz archive
+Write-Host "Compressing the runtime library into tar.gz archive..."
+$archiveName = "library-dxrt-$dxrtVersion.tar.gz"
+$archivePath = Join-Path $artifactsDir $archiveName
+$dllPath = Join-Path $artifactsDir $dllName
+
+# Change to artifacts directory to create archive with relative path
+Push-Location $artifactsDir
+try {
+    tar -czf $archiveName $dllName
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to create tar.gz archive. tar command exited with code $LASTEXITCODE."
+        exit $LASTEXITCODE
+    }
+    Write-Host "Library package created: $archivePath"
+} finally {
+    Pop-Location
+}
+
 Write-Host "RuntimeLibrary build completed. DLL copied to: $artifactsDir\$dllName"
+Write-Host "Archive created at: $archivePath"
