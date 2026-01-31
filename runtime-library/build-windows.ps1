@@ -11,7 +11,7 @@ if (-not $DxrtRoot) {
 
 # Resolve OAAX runtime version
 if (-not $RuntimeVersion) {
-    $versionPath = Join-Path $PSScriptRoot "dxrt_version.txt"
+    $versionPath = Join-Path $PSScriptRoot "..\VERSION"
     if (Test-Path $versionPath) {
         $RuntimeVersion = (Get-Content $versionPath -Raw).Trim()
     }
