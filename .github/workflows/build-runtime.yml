@@ -9,7 +9,7 @@ on:
       - main
 
 jobs:
-  build-runtime:
+  build-runtime-ubuntu:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     strategy:
@@ -25,7 +25,6 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 1
-          submodules: 'recursive'
           lfs: true
 
       - name: Install s3cmd and Python dependencies
@@ -85,3 +84,80 @@ jobs:
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             s3cmd put "$library_file" "s3://oaax/runtimes/latest/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           fi
+
+  build-runtime-windows:
+    timeout-minutes: 10
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: ["x86_64"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          lfs: true
+
+      - name: Download DX RT
+        shell: pwsh
+        run: |
+          cd runtime-library
+          $dxrt_windows_commit = Get-Content ./dxrt_windows_commit.txt
+          git clone https://github.com/DEEPX-AI/dx_rt_windows.git
+          cd dx_rt_windows
+          git checkout $dxrt_windows_commit
+          cd ..
+
+      - name: Compile runtime
+        shell: pwsh
+        run: |
+          cd runtime-library
+          ./build-windows.ps1 `
+            -DxrtRoot "dx_rt_windows\m1\v.3.1.1\dx_rt" `
+            -Configuration Release
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+            if ("${{ github.ref }}" -eq "refs/heads/main") {
+            if (Test-Path VERSION) {
+              $version = Get-Content VERSION
+            } else {
+              throw "VERSION file missing"
+            }
+            } else {
+            $version = "${{ github.head_ref }}"
+            }
+            echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload runtimes to Custom S3-Compatible Bucket
+        shell: pwsh
+        run: |
+          $version = $env:version
+          $artifactDir = "runtime-library\artifacts\x86_64-windows"
+          $artifactPath = (Get-ChildItem -Path $artifactDir -File | Where-Object { $_.Name -like "*.tar.gz" } | Select-Object -First 1).FullName
+          if (-Not $artifactPath) {
+            throw "No .tar.gz artifact file found in directory: $artifactDir"
+          }
+          $targetKey = "runtimes/$version/DEEPX/x86_64/Windows/"
+          $latestTargetKey = "runtimes/latest/DEEPX/x86_64/Windows/"
+
+          $s5cmdUrl = "https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Windows-64bit.zip"
+          $s5cmdZip = "$env:USERPROFILE\s5cmd.zip"
+          $s5cmdPath = "$env:USERPROFILE\s5cmd"
+          Invoke-WebRequest -Uri $s5cmdUrl -OutFile $s5cmdZip
+          Expand-Archive -Path $s5cmdZip -DestinationPath $s5cmdPath -Force
+          Remove-Item -Path $s5cmdZip
+
+          $env:PATH += ";$s5cmdPath"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::User)
+
+          Write-Host "Uploading $artifactPath to s3://oaax/$targetKey"
+          $env:AWS_ACCESS_KEY_ID = "${{ secrets.S3_ACCESS_KEY }}"
+          $env:AWS_SECRET_ACCESS_KEY = "${{ secrets.S3_SECRET_KEY }}"
+          s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$targetKey"
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
+            s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$latestTargetKey"
+          }

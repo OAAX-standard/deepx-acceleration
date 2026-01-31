@@ -1,6 +1,16 @@
 #ifndef RUNTIME_CORE_H
 #define RUNTIME_CORE_H
 
+#if defined(_WIN32) || defined(_WIN64)
+#  ifdef RUNTIME_LIBRARY_EXPORTS
+#    define RUNTIME_API __declspec(dllexport)
+#  else
+#    define RUNTIME_API __declspec(dllimport)
+#  endif
+#else
+#  define RUNTIME_API
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,7 +26,7 @@ extern "C" {
  *
  * @return 0 if the initialization is successful, and non-zero otherwise.
  */
-int runtime_initialization();
+RUNTIME_API int runtime_initialization();
 
 /**
  * @brief This function is called to initialize the runtime environment with arguments.
@@ -30,7 +40,7 @@ int runtime_initialization();
  * @param values The values of the arguments.
  * @return 0 if the initialization is successful, and non-zero otherwise.
  */
-int runtime_initialization_with_args(int length, const char **keys, const void **values);
+RUNTIME_API int runtime_initialization_with_args(int length, const char **keys, const void **values);
 
 /**
  * @brief This function is called to load the model from the file path.
@@ -38,7 +48,7 @@ int runtime_initialization_with_args(int length, const char **keys, const void *
  * @param file_path The path to the model file.
  * @return 0 if the model is loaded successfully, and non-zero otherwise.
  */
-int runtime_model_loading(const char *file_path);
+RUNTIME_API int runtime_model_loading(const char *file_path);
 
 /**
  * @brief This function is called to store the input tensors to be processed by the runtime when it's ready.
@@ -52,7 +62,7 @@ int runtime_model_loading(const char *file_path);
  * 
  * @return 0 if the input tensors are stored successfully, and non-zero otherwise.
  */
-int send_input(tensors_struct *input_tensors);
+RUNTIME_API int send_input(tensors_struct *input_tensors);
 
 /**
  * @brief This function is called to retrieve any available output tensors after the inference process is done.
@@ -63,35 +73,35 @@ int send_input(tensors_struct *input_tensors);
  * 
  * @return 0 if an output is available and returned, and non-zero otherwise.
  */
-int receive_output(tensors_struct **output_tensors);
+RUNTIME_API int receive_output(tensors_struct **output_tensors);
 
 /**
  * @brief This function is called to destroy the runtime environment after the inference process is stopped.
- *
+
  * @return 0 if the finalization is successful, and non-zero otherwise.
  */
-int runtime_destruction();
+RUNTIME_API int runtime_destruction();
 
 /**
  * @brief This function is called to get the error message in case of a runtime error.
- *
+
  * @return The error message in a human-readable format. This should be allocated by the shared library, and proper deallocation should be handled by the library.
  */
-const char *runtime_error_message();
+RUNTIME_API const char *runtime_error_message();
 
 /**
  * @brief This function is called to get the version of the shared library.
- *
+
  * @return The version of the shared library. This should be allocated by the shared library, and proper deallocation should be handled by the library.
  */
-const char *runtime_version();
+RUNTIME_API const char *runtime_version();
 
 /**
  * @brief This function is called to get the name of the shared library.
- *
+
  * @return The name of the shared library. This should be allocated by the shared library, and proper deallocation should be handled by the library.
  */
-const char *runtime_name();
+RUNTIME_API const char *runtime_name();
 
 #ifdef __cplusplus
 }
