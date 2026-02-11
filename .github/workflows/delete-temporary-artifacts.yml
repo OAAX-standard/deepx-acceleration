@@ -1,4 +1,4 @@
-name: Delete runtimes and toolchain on PR close
+name: Delete test runtimes and toolchain on PR close
 
 on:
   pull_request:
@@ -6,7 +6,7 @@ on:
       - closed
 
 jobs:
-  handle-pr:
+  delete-temporary-artifacts:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +30,9 @@ jobs:
       - name: Determine version
         run: |
           version=${{ github.head_ref }}
+          echo "version=${version}" >> $GITHUB_ENV
+          echo "Environment variable: ${{ env.version }}"
+
 
       - name: Delete runtimes and toolchain folders from S3
         run: |
