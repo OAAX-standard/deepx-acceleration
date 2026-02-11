@@ -114,9 +114,17 @@ jobs:
         shell: pwsh
         run: |
           cd runtime-library
-          ./build-windows.ps1 `
-            -DxrtRoot "dx_rt_windows\m1\v.3.1.1\dx_rt" `
-            -Configuration Release
+          $m1Dir = Join-Path "dx_rt_windows" "m1"
+          $dxrtRoot = $null
+          foreach ($v in (Get-ChildItem -Path $m1Dir -Directory)) {
+            $candidate = Join-Path $v.FullName "dx_rt"
+            if ((Test-Path (Join-Path $candidate "include")) -and (Test-Path (Join-Path $candidate "lib"))) {
+              $dxrtRoot = $candidate
+              break
+            }
+          }
+          if (-not $dxrtRoot) { throw "Could not find dx_rt SDK (include/ and lib/) under dx_rt_windows/m1/" }
+          ./build-windows.ps1 -DxrtRoot $dxrtRoot -Configuration Release
       - name: Determine version
         id: version
         shell: pwsh
