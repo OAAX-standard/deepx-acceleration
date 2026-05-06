@@ -48,13 +48,11 @@ find_package(Threads REQUIRED)
 # Add source files
 set(SOURCES
     src/runtime_core.cpp
-    deps/src/tensors_struct.c
 )
 
 # Add header files
 set(HEADERS
     include/runtime_core.h
-    deps/include/tensors_struct.h
 )
 
 # Create shared library

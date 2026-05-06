@@ -1,9 +1,5 @@
 #include "runtime_core.h"
 
-extern "C" {
-#include "tensors_struct.h"
-}
-
 #include <memory>
 #include <vector>
 #include <queue>
@@ -14,19 +10,32 @@ extern "C" {
 #include <stdio.h>
 #include <thread>
 #include <fstream>
+#include <chrono>
+#include <string>
 
 #include <dxrt/dxrt_api.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
 struct JobData {
     int job_id;
-    void *outputs_ptr; 
-    tensors_struct *input_tensors;
+    int model_id;
+    int request_id;
+    void *outputs_ptr;
+    Tensors *input_tensors;
     std::vector<std::shared_ptr<dxrt::Tensor>> dxrt_outputs;
 };
 
+// ---------------------------------------------------------------------------
+// Static state
+// ---------------------------------------------------------------------------
+
 static std::shared_ptr<spdlog::logger> logger;
+static std::atomic<bool> g_initialized{false};
 
 static dxrt::InferenceEngine *inference_engine = nullptr;
 static std::vector<uint64_t> OutputTensorSizes;
@@ -34,7 +43,7 @@ static std::vector<uint64_t> OutputTensorSizes;
 static size_t OUTPUTS_POOL_CAPACITY = 0;
 static size_t NumDevice = 0;
 
-static std::queue<void*> outputs_ptr_pool;
+static std::queue<void *> outputs_ptr_pool;
 static std::mutex outputs_pool_mutex;
 static std::condition_variable outputs_pool_cv;
 
@@ -50,152 +59,179 @@ static std::atomic<bool> stop_wait_thread{false};
 static std::atomic<bool> wait_thread_started{false};
 static std::thread wait_thread;
 
-static tensors_struct *create_output_tensors_struct();
-static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vector<std::shared_ptr<dxrt::Tensor>> &outputs, tensors_struct *output_tensors);
-static tensor_data_type mapDataTypeToTensorDataType(dxrt::DataType dtype);
-static void wait_loop();
+static std::string g_last_error;
+static std::string g_info_json;
 
-static tensors_struct *create_output_tensors_struct() {
-    int num_tensors = OutputTensorSizes.size();
-    if (num_tensors == 0) {
+// ---------------------------------------------------------------------------
+// Helper: free Tensors (OAAX 2.0 structure)
+// ---------------------------------------------------------------------------
+
+static void deep_free_tensors(Tensors *t) {
+    if (!t) return;
+    if (t->tensors) {
+        for (int i = 0; i < t->num_tensors; i++) {
+            free(t->tensors[i].name);
+            free(t->tensors[i].shape);
+            free(t->tensors[i].data);
+        }
+        free(t->tensors);
+    }
+    free(t);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: map dxrt DataType to TensorElementType
+// ---------------------------------------------------------------------------
+
+static TensorElementType mapDataType(dxrt::DataType dtype) {
+    switch (dtype) {
+    case dxrt::UINT8:  return DATA_TYPE_UINT8;
+    case dxrt::UINT16: return DATA_TYPE_UINT16;
+    case dxrt::UINT32: return DATA_TYPE_UINT32;
+    case dxrt::UINT64: return DATA_TYPE_UINT64;
+    case dxrt::INT8:   return DATA_TYPE_INT8;
+    case dxrt::INT16:  return DATA_TYPE_INT16;
+    case dxrt::INT32:  return DATA_TYPE_INT32;
+    case dxrt::INT64:  return DATA_TYPE_INT64;
+    case dxrt::FLOAT:  return DATA_TYPE_FLOAT;
+    default:           return DATA_TYPE_UNDEFINED;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: create output Tensors with pre-allocated data buffers
+// ---------------------------------------------------------------------------
+
+static Tensors *create_output_tensors(int request_id) {
+    int num_tensors = (int)OutputTensorSizes.size();
+    if (num_tensors == 0) return nullptr;
+
+    Tensors *t = (Tensors *)malloc(sizeof(Tensors));
+    if (!t) return nullptr;
+
+    t->id = request_id;
+    t->num_tensors = num_tensors;
+    t->tensors = (TensorDescriptor *)calloc(num_tensors, sizeof(TensorDescriptor));
+    if (!t->tensors) {
+        free(t);
         return nullptr;
     }
-    
-    tensors_struct *tensors = (tensors_struct *)malloc(sizeof(tensors_struct));
-    if (tensors == nullptr) {
-        return nullptr;
-    }
-    
-    tensors->num_tensors = num_tensors;
-    
-    tensors->names = (char **)malloc(num_tensors * sizeof(char *));
-    if (tensors->names == nullptr) {
-        free(tensors);
-        return nullptr;
-    }
-    
-    tensors->data_types = (tensor_data_type *)malloc(num_tensors * sizeof(tensor_data_type));
-    if (tensors->data_types == nullptr) {
-        free(tensors->names);
-        free(tensors);
-        return nullptr;
-    }
-    
-    tensors->ranks = (size_t *)malloc(num_tensors * sizeof(size_t));
-    if (tensors->ranks == nullptr) {
-        free(tensors->data_types);
-        free(tensors->names);
-        free(tensors);
-        return nullptr;
-    }
-    
-    tensors->shapes = (size_t **)malloc(num_tensors * sizeof(size_t *));
-    if (tensors->shapes == nullptr) {
-        free(tensors->ranks);
-        free(tensors->data_types);
-        free(tensors->names);
-        free(tensors);
-        return nullptr;
-    }
-    
-    tensors->data = (void **)malloc(num_tensors * sizeof(void *));
-    if (tensors->data == nullptr) {
-        free(tensors->shapes);
-        free(tensors->ranks);
-        free(tensors->data_types);
-        free(tensors->names);
-        free(tensors);
-        return nullptr;
-    }
-        
-    for (size_t i = 0; i < num_tensors; i++) {
-        tensors->names[i] = nullptr;
-        tensors->data_types[i] = DATA_TYPE_UNDEFINED;
-        tensors->ranks[i] = 0;
-        tensors->shapes[i] = nullptr;
-        tensors->data[i] = malloc(OutputTensorSizes[i]);
-        if (tensors->data[i] == nullptr) {
-            deep_free_tensors_struct(tensors);
+
+    for (int i = 0; i < num_tensors; i++) {
+        t->tensors[i].data_size = OutputTensorSizes[i];
+        t->tensors[i].data = malloc(OutputTensorSizes[i]);
+        if (!t->tensors[i].data) {
+            deep_free_tensors(t);
             return nullptr;
         }
     }
-    
-    return tensors;
+    return t;
 }
 
-static tensors_struct *copy_dxrt_outputs_to_output_tensors_struct(const std::vector<std::shared_ptr<dxrt::Tensor>> &outputs, tensors_struct *output_tensors) {
-    size_t num_output_tensors = outputs.size();
-    if (output_tensors == nullptr) {
+// ---------------------------------------------------------------------------
+// Helper: copy dxrt outputs into the Tensors structure
+// ---------------------------------------------------------------------------
+
+static Tensors *copy_dxrt_outputs(const std::vector<std::shared_ptr<dxrt::Tensor>> &outputs,
+                                  Tensors *out_tensors) {
+    if (!out_tensors) return nullptr;
+
+    int num = (int)outputs.size();
+    if (num == 0 || out_tensors->num_tensors != num) {
+        spdlog::error("Output tensor count mismatch: dxrt={}, expected={}", num, out_tensors->num_tensors);
         return nullptr;
     }
-    if (num_output_tensors == 0 || output_tensors->num_tensors != num_output_tensors) {
-        spdlog::error("Output tensor size mismatch: dxrt_outputs={}, output_tensors_struct={}",
-                      num_output_tensors, output_tensors->num_tensors);
-        return nullptr;
-    }
-    
-    for (size_t i = 0; i < num_output_tensors; i++) {
-        const auto& output = outputs[i];
-        
+
+    for (int i = 0; i < num; i++) {
+        const auto &output = outputs[i];
+
         auto name = output->name();
         auto shape = output->shape();
         auto dtype = output->type();
         auto data = output->data();
-        
-        output_tensors->names[i] = strdup(name.c_str());
-        if (!output_tensors->names[i]) {
+
+        out_tensors->tensors[i].name = strdup(name.c_str());
+        if (!out_tensors->tensors[i].name) {
             spdlog::error("Failed to allocate name for tensor {}", i);
-            deep_free_tensors_struct(output_tensors);
+            deep_free_tensors(out_tensors);
             return nullptr;
         }
-        
-        output_tensors->ranks[i] = shape.size();
-        output_tensors->shapes[i] = (size_t *)malloc(shape.size() * sizeof(size_t));
-        if (!output_tensors->shapes[i]) {
+
+        out_tensors->tensors[i].data_type = mapDataType(dtype);
+        out_tensors->tensors[i].rank = (int)shape.size();
+        out_tensors->tensors[i].shape = (int *)malloc(shape.size() * sizeof(int));
+        if (!out_tensors->tensors[i].shape) {
             spdlog::error("Failed to allocate shape for tensor {}", i);
-            deep_free_tensors_struct(output_tensors);
+            deep_free_tensors(out_tensors);
             return nullptr;
         }
-        
+
         for (size_t j = 0; j < shape.size(); j++) {
-            output_tensors->shapes[i][j] = shape[j];
+            out_tensors->tensors[i].shape[j] = (int)shape[j];
         }
 
-        output_tensors->data_types[i] = mapDataTypeToTensorDataType(dtype);
-        
-        memcpy(output_tensors->data[i], data, OutputTensorSizes[i]);
+        memcpy(out_tensors->tensors[i].data, data, OutputTensorSizes[i]);
     }
-    return output_tensors;
+    return out_tensors;
 }
 
-static tensor_data_type mapDataTypeToTensorDataType(dxrt::DataType dtype) {
-    switch (dtype) {
-    case dxrt::UINT8:
-        return DATA_TYPE_UINT8;
-    case dxrt::UINT16:
-        return DATA_TYPE_UINT16;
-    case dxrt::UINT32:
-        return DATA_TYPE_UINT32;
-    case dxrt::UINT64:
-        return DATA_TYPE_UINT64;
-    case dxrt::INT8:
-        return DATA_TYPE_INT8;
-    case dxrt::INT16:
-        return DATA_TYPE_INT16;
-    case dxrt::INT32:
-        return DATA_TYPE_INT32;
-    case dxrt::INT64:
-        return DATA_TYPE_INT64;
-    case dxrt::FLOAT:
-        return DATA_TYPE_FLOAT;
-    default:
-        return DATA_TYPE_UNDEFINED;
+// ---------------------------------------------------------------------------
+// wait_loop: background thread that waits for inference completion
+// ---------------------------------------------------------------------------
+
+static void wait_loop() {
+    while (true) {
+        JobData job_data{};
+        {
+            std::unique_lock<std::mutex> lock(job_data_queue_mutex);
+            job_data_queue_cv.wait(lock, []() {
+                return stop_wait_thread.load() || !job_data_queue.empty();
+            });
+            if (stop_wait_thread.load() && job_data_queue.empty()) {
+                break;
+            }
+            job_data = job_data_queue.front();
+            job_data_queue.pop();
+        }
+
+        try {
+            job_data.dxrt_outputs = inference_engine->Wait(job_data.job_id);
+        } catch (...) {
+            spdlog::error("[wait_loop] Failed to wait for outputs. job_id: {}", job_data.job_id);
+            if (job_data.input_tensors) deep_free_tensors(job_data.input_tensors);
+            if (job_data.outputs_ptr) {
+                std::lock_guard<std::mutex> lock(outputs_pool_mutex);
+                outputs_ptr_pool.push(job_data.outputs_ptr);
+                outputs_pool_cv.notify_one();
+            }
+            continue;
+        }
+
+        if (job_data.input_tensors) {
+            deep_free_tensors(job_data.input_tensors);
+            job_data.input_tensors = nullptr;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(output_queue_mutex);
+            output_queue.push(job_data);
+            output_queue_cv.notify_one();
+        }
     }
 }
 
-int runtime_initialization() {
+// ===========================================================================
+// Public API implementation (OAAX 2.0)
+// ===========================================================================
+
+RuntimeStatus runtime_init(Config config) {
+    if (g_initialized.load()) {
+        g_last_error = "Runtime already initialized";
+        return RUNTIME_STATUS_ALREADY_INITIALIZED;
+    }
+
     try {
-        logger = spdlog::basic_logger_mt(runtime_name(), "runtime.log");
+        logger = spdlog::basic_logger_mt(runtime_get_name(), "runtime.log");
         spdlog::set_default_logger(logger);
         spdlog::set_level(spdlog::level::info);
         spdlog::info("Initializing the runtime environment");
@@ -203,41 +239,57 @@ int runtime_initialization() {
         printf("Warning: Failed to create logger: %s, continuing without file logging\n", ex.what());
     }
 
-    return 0;
-}
-
-int runtime_initialization_with_args(int length, const char **keys, const void **values) {
-    (void)values;
-    
-    int ret = runtime_initialization();
-    if (ret != 0) {
-        return ret;
-    }
-
-    spdlog::info("Runtime initialized with arguments");
-    for (int i = 0; i < length; i++) {
-        spdlog::debug("Using Key: {}", keys[i]);
-    }
-
-    return 0;
-}
-
-int runtime_model_loading(const char *file_path) {
-    {
-        std::ifstream f(file_path, std::ios::binary);
-        if (!f) {
-            spdlog::error("Model file does not exist: {}", file_path);
-            return 1;
+    for (int i = 0; i < config.length; i++) {
+        if (config.keys[i]) {
+            spdlog::debug("Config key: {} = {}", config.keys[i],
+                          config.values[i] ? config.values[i] : "(null)");
         }
     }
 
-    spdlog::info("Loading model from: {}", file_path);
+    g_initialized.store(true);
+    return RUNTIME_STATUS_SUCCESS;
+}
+
+RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs) {
+    if (!g_initialized.load()) {
+        g_last_error = "Runtime not initialized";
+        return RUNTIME_STATUS_NOT_INITIALIZED;
+    }
+
+    if (num_models <= 0 || !model_configs) {
+        g_last_error = "Invalid argument: num_models or model_configs";
+        return RUNTIME_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Phase 1: single model support only
+    if (num_models != 1) {
+        g_last_error = "Multiple models not yet supported (Phase 1)";
+        return RUNTIME_STATUS_INVALID_ARGUMENT;
+    }
+
+    const ModelConfig &mc = model_configs[0];
+    if (!mc.file_path) {
+        g_last_error = "Model file path is null";
+        return RUNTIME_STATUS_INVALID_ARGUMENT;
+    }
+
+    {
+        std::ifstream f(mc.file_path, std::ios::binary);
+        if (!f) {
+            spdlog::error("Model file does not exist: {}", mc.file_path);
+            g_last_error = std::string("Model file not found: ") + mc.file_path;
+            return RUNTIME_STATUS_FILE_NOT_FOUND;
+        }
+    }
+
+    spdlog::info("Loading model from: {}", mc.file_path);
 
     try {
-        inference_engine = new dxrt::InferenceEngine(std::string(file_path));
+        inference_engine = new dxrt::InferenceEngine(std::string(mc.file_path));
         if (inference_engine == nullptr) {
-            spdlog::error("Failed to create inference engine");
-            return 1;
+            g_last_error = "Failed to create inference engine";
+            spdlog::error("{}", g_last_error);
+            return RUNTIME_STATUS_ERROR;
         }
 
         NumDevice = dxrt::DeviceStatus::GetDeviceCount();
@@ -249,14 +301,15 @@ int runtime_model_loading(const char *file_path) {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             while (!outputs_ptr_pool.empty()) outputs_ptr_pool.pop();
             for (size_t i = 0; i < OUTPUTS_POOL_CAPACITY; ++i) {
-                void* outputs_ptr = malloc(OutputSize);
-                if (!outputs_ptr) {
+                void *buf = malloc(OutputSize);
+                if (!buf) {
                     spdlog::error("Failed to allocate output buffer {}", i);
                     continue;
                 }
-                outputs_ptr_pool.push(outputs_ptr);
+                outputs_ptr_pool.push(buf);
             }
-            spdlog::info("Initialized outputs_ptr_pool with {} buffers for {} devices", outputs_ptr_pool.size(), NumDevice);
+            spdlog::info("Initialized outputs_ptr_pool with {} buffers for {} devices",
+                         outputs_ptr_pool.size(), NumDevice);
         }
         outputs_pool_cv.notify_one();
 
@@ -273,48 +326,77 @@ int runtime_model_loading(const char *file_path) {
                     outputs_ptr_pool.pop();
                 }
             }
-            if (inference_engine) { delete inference_engine; inference_engine = nullptr; }
-            return 1;
+            delete inference_engine;
+            inference_engine = nullptr;
+            g_last_error = "Failed to create wait thread";
+            return RUNTIME_STATUS_ERROR;
         }
 
-        return 0;
-    } catch (const std::exception& e) {
+        return RUNTIME_STATUS_SUCCESS;
+    } catch (const std::exception &e) {
         spdlog::error("Failed to load model: {}", e.what());
-        return 1;
+        g_last_error = std::string("Failed to load model: ") + e.what();
+        return RUNTIME_STATUS_INVALID_MODEL;
     }
 }
 
-int send_input(tensors_struct *input_tensors) {
-
-    if (input_tensors->num_tensors != 1) {
-        spdlog::error("[send_input] Invalid number of input tensors: {}", input_tensors->num_tensors);
-        return 1;
+RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
+    if (!g_initialized.load()) {
+        g_last_error = "Runtime not initialized";
+        return RUNTIME_STATUS_NOT_INITIALIZED;
     }
-    
+
+    if (!inference_engine) {
+        g_last_error = "Model not loaded";
+        return RUNTIME_STATUS_MODEL_NOT_LOADED;
+    }
+
+    // Phase 1: single model, model_id must be 0
+    if (model_id != 0) {
+        g_last_error = "Invalid model_id";
+        return RUNTIME_STATUS_INVALID_MODEL_ID;
+    }
+
+    if (!input_tensors || input_tensors->num_tensors < 1 || !input_tensors->tensors) {
+        g_last_error = "Invalid input tensors";
+        return RUNTIME_STATUS_INVALID_TENSOR;
+    }
+
     void *outputs_ptr = nullptr;
     {
         std::unique_lock<std::mutex> lock(outputs_pool_mutex);
-        outputs_pool_cv.wait(lock, [](){ return !outputs_ptr_pool.empty(); });
+        outputs_pool_cv.wait(lock, []() {
+            return !outputs_ptr_pool.empty() || stop_wait_thread.load();
+        });
+        if (stop_wait_thread.load() && outputs_ptr_pool.empty()) {
+            g_last_error = "Runtime is shutting down";
+            return RUNTIME_STATUS_ERROR;
+        }
         outputs_ptr = outputs_ptr_pool.front();
         outputs_ptr_pool.pop();
     }
 
     int job_id = -1;
     try {
-        job_id = inference_engine->RunAsync(static_cast<uint8_t *>(input_tensors->data[0]), nullptr, outputs_ptr);
-    } catch (const std::exception& e) {
-        spdlog::error("[send_input] Failed to run inference : {}", e.what());
+        job_id = inference_engine->RunAsync(
+            static_cast<uint8_t *>(input_tensors->tensors[0].data),
+            nullptr,
+            outputs_ptr);
+    } catch (const std::exception &e) {
+        spdlog::error("[enqueue_input] Failed to run inference: {}", e.what());
+        g_last_error = std::string("Inference failed: ") + e.what();
         {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(outputs_ptr);
             outputs_pool_cv.notify_one();
         }
-        if (input_tensors) deep_free_tensors_struct(input_tensors);
-        return 1;
+        return RUNTIME_STATUS_INFERENCE_ERROR;
     }
 
-    JobData job_data;
+    JobData job_data{};
     job_data.job_id = job_id;
+    job_data.model_id = model_id;
+    job_data.request_id = input_tensors->id;
     job_data.input_tensors = input_tensors;
     job_data.outputs_ptr = outputs_ptr;
 
@@ -324,128 +406,138 @@ int send_input(tensors_struct *input_tensors) {
         job_data_queue_cv.notify_one();
     }
 
-    return 0;
+    return RUNTIME_STATUS_SUCCESS;
 }
 
-static void wait_loop() {
-    while (true) {
-        JobData job_data{};
-        {
-            std::unique_lock<std::mutex> lock(job_data_queue_mutex);
-            job_data_queue_cv.wait(lock, [](){ return stop_wait_thread.load() || !job_data_queue.empty(); });
-            if (stop_wait_thread.load() && job_data_queue.empty()) {
-                break;
-            }
-            job_data = job_data_queue.front();
-            job_data_queue.pop();
-        }
-
-        try {
-            job_data.dxrt_outputs = inference_engine->Wait(job_data.job_id);
-        } catch (...) {
-            spdlog::error("[wait_loop] Failed to wait for outputs. job_id: {}", job_data.job_id);
-            if (job_data.input_tensors) deep_free_tensors_struct(job_data.input_tensors);
-            if (job_data.outputs_ptr) {
-                std::lock_guard<std::mutex> lock(outputs_pool_mutex);
-                outputs_ptr_pool.push(job_data.outputs_ptr);
-                outputs_pool_cv.notify_one();
-            }
-            continue;
-        }
-
-        if (job_data.input_tensors) deep_free_tensors_struct(job_data.input_tensors);
-
-        {
-            std::lock_guard<std::mutex> lock(output_queue_mutex);
-            output_queue.push(job_data);
-            output_queue_cv.notify_one();
-        }
+RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, int timeout_ms) {
+    if (!output_tensors) {
+        g_last_error = "output_tensors pointer is null";
+        return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
-}
 
-int receive_output(tensors_struct **output_tensors) {
+    *output_tensors = nullptr;
 
-    JobData job_data;
+    if (!g_initialized.load()) {
+        g_last_error = "Runtime not initialized";
+        return RUNTIME_STATUS_NOT_INITIALIZED;
+    }
+
+    JobData job_data{};
     {
         std::unique_lock<std::mutex> lock(output_queue_mutex);
-        output_queue_cv.wait(lock, [](){ return stop_wait_thread.load() || !output_queue.empty(); });
-        if (stop_wait_thread.load() && output_queue.empty()) {
-            *output_tensors = nullptr;
-            return 1;
+
+        auto predicate = []() {
+            return stop_wait_thread.load() || !output_queue.empty();
+        };
+
+        if (timeout_ms == 0) {
+            // Non-blocking poll
+            if (!predicate()) {
+                return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
+            }
+        } else if (timeout_ms > 0) {
+            // Timed wait
+            bool got = output_queue_cv.wait_for(
+                lock, std::chrono::milliseconds(timeout_ms), predicate);
+            if (!got) {
+                return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
+            }
+        } else {
+            // Infinite wait (negative timeout)
+            output_queue_cv.wait(lock, predicate);
         }
+
+        if (stop_wait_thread.load() && output_queue.empty()) {
+            return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
+        }
+
         job_data = output_queue.front();
         output_queue.pop();
     }
 
-    tensors_struct *output_tensors_struct = create_output_tensors_struct();
-    if (!output_tensors_struct) {
-        spdlog::error("[receive_output] Failed to allocate output tensors");
+    Tensors *result = create_output_tensors(job_data.request_id);
+    if (!result) {
+        spdlog::error("[retrieve_output] Failed to allocate output tensors");
+        g_last_error = "Failed to allocate output tensors";
         if (job_data.outputs_ptr) {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(job_data.outputs_ptr);
             outputs_pool_cv.notify_one();
         }
-        *output_tensors = nullptr;
-        return 1;
+        return RUNTIME_STATUS_OUT_OF_MEMORY;
     }
 
-    *output_tensors = copy_dxrt_outputs_to_output_tensors_struct(job_data.dxrt_outputs, output_tensors_struct);
-    if (*output_tensors == nullptr) {
-        spdlog::error("[receive_output] Failed to convert dxrt outputs to output tensors");
+    Tensors *copied = copy_dxrt_outputs(job_data.dxrt_outputs, result);
+    if (!copied) {
+        spdlog::error("[retrieve_output] Failed to copy dxrt outputs");
+        g_last_error = "Failed to copy output tensors";
         if (job_data.outputs_ptr) {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(job_data.outputs_ptr);
             outputs_pool_cv.notify_one();
         }
-        return 1;
+        return RUNTIME_STATUS_ERROR;
     }
 
+    // Return outputs_ptr to pool
     if (job_data.outputs_ptr) {
         std::lock_guard<std::mutex> lock(outputs_pool_mutex);
         outputs_ptr_pool.push(job_data.outputs_ptr);
         outputs_pool_cv.notify_one();
     }
 
-    return 0;
+    *output_tensors = copied;
+    if (model_id) {
+        *model_id = job_data.model_id;
+    }
+    return RUNTIME_STATUS_SUCCESS;
 }
 
-int runtime_destruction() {
-    spdlog::info("Destroying the runtime environment");
+RuntimeStatus runtime_cleanup(void) {
+    if (!g_initialized.load()) {
+        // Idempotent: already cleaned up
+        return RUNTIME_STATUS_SUCCESS;
+    }
+
+    spdlog::info("Cleaning up the runtime environment");
 
     stop_wait_thread.store(true);
     job_data_queue_cv.notify_all();
     output_queue_cv.notify_all();
     outputs_pool_cv.notify_all();
 
+    // Drain output queue
     {
         std::lock_guard<std::mutex> lock(output_queue_mutex);
         while (!output_queue.empty()) {
             JobData r = std::move(output_queue.front());
             output_queue.pop();
-            if (r.input_tensors) deep_free_tensors_struct(r.input_tensors);
+            if (r.input_tensors) deep_free_tensors(r.input_tensors);
             if (r.outputs_ptr) free(r.outputs_ptr);
         }
     }
 
+    // Drain job queue
     {
         std::lock_guard<std::mutex> lock(job_data_queue_mutex);
         while (!job_data_queue.empty()) {
             JobData j = job_data_queue.front();
             job_data_queue.pop();
-            if (j.input_tensors) deep_free_tensors_struct(j.input_tensors);
+            if (j.input_tensors) deep_free_tensors(j.input_tensors);
             if (j.outputs_ptr) free(j.outputs_ptr);
         }
     }
 
+    // Free output pool
     {
         std::lock_guard<std::mutex> lock(outputs_pool_mutex);
         while (!outputs_ptr_pool.empty()) {
-            void *outputs_ptr = outputs_ptr_pool.front();
+            free(outputs_ptr_pool.front());
             outputs_ptr_pool.pop();
-            free(outputs_ptr);
         }
     }
 
+    // Join wait thread
     if (wait_thread_started.load()) {
         if (wait_thread.joinable()) {
             wait_thread.join();
@@ -453,29 +545,70 @@ int runtime_destruction() {
         wait_thread_started.store(false);
     }
 
+    // Destroy inference engine
     if (inference_engine != nullptr) {
         delete inference_engine;
         inference_engine = nullptr;
         spdlog::info("Inference engine destroyed");
     }
 
-    spdlog::info("Runtime destruction completed");
+    OutputTensorSizes.clear();
+    OUTPUTS_POOL_CAPACITY = 0;
+    NumDevice = 0;
+
+    spdlog::info("Runtime cleanup completed");
     if (logger) {
         logger->flush();
         logger.reset();
     }
 
-    return 0;
+    g_initialized.store(false);
+    g_last_error.clear();
+
+    return RUNTIME_STATUS_SUCCESS;
 }
 
-const char *runtime_error_message() { 
-    return ""; 
+const char *runtime_get_error(void) {
+    if (g_last_error.empty()) return nullptr;
+    return g_last_error.c_str();
 }
 
-const char *runtime_version() { 
-    return OAAX_RUNTIME_VERSION; 
+const char *runtime_get_version(void) {
+    return OAAX_RUNTIME_VERSION;
 }
 
-const char *runtime_name() { 
-    return "DEEPX"; 
+const char *runtime_get_name(void) {
+    return "DEEPX";
+}
+
+const char *runtime_get_info(void) {
+    if (!g_initialized.load()) return nullptr;
+
+    size_t pool_size = 0;
+    size_t in_flight = 0;
+    {
+        std::lock_guard<std::mutex> lock(outputs_pool_mutex);
+        pool_size = outputs_ptr_pool.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(job_data_queue_mutex);
+        in_flight = job_data_queue.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(output_queue_mutex);
+        in_flight += output_queue.size();
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "{\"loaded_models\": %d, \"requests_in_flight\": %zu, "
+             "\"pool_size\": %zu, \"pool_capacity\": %zu, \"num_devices\": %zu}",
+             inference_engine ? 1 : 0,
+             in_flight,
+             pool_size,
+             OUTPUTS_POOL_CAPACITY,
+             NumDevice);
+
+    g_info_json = buf;
+    return g_info_json.c_str();
 }
