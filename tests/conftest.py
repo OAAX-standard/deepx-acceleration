@@ -18,7 +18,7 @@ import pytest
 from tests.models import TEST_MODELS, download_model
 
 COMPILED_DIR = Path(__file__).parent / "compiled_models"
-DOCKER_IMAGE = os.environ.get("DEEPX_TOOLCHAIN_IMAGE", "deepx-conversion-toolchain:22.04")
+DOCKER_IMAGE = os.environ.get("DEEPX_TOOLCHAIN_IMAGE", "oaax-deepx-toolchain:latest")
 
 
 def _docker_image_available() -> bool:

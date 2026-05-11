@@ -13,5 +13,6 @@ RUN apt-get update && \
 WORKDIR /app
 
 COPY scripts/ /app/scripts
+COPY dx_com/ /app/dx_com/
 
 ENTRYPOINT ["bash", "/app/scripts/convert.sh"]
