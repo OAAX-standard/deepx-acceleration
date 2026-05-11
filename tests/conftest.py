@@ -35,7 +35,7 @@ def _docker_image_available() -> bool:
         )
         if r.returncode != 0:
             print(f"\n[docker check] image '{DOCKER_IMAGE}' not found (docker inspect rc={r.returncode})")
-            print(f"\n[docker check] Available images:")
+            print("\n[docker check] Available images:")
             subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], timeout=10)
         return r.returncode == 0
     except Exception as e:
