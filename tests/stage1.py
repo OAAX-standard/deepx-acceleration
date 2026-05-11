@@ -27,7 +27,6 @@ def run_pytest(extra_args: list[str]) -> int:
         "-m",
         "pytest",
         "-v",
-        "-s",
         str(TESTS_DIR / "test_conversion.py"),
     ] + extra_args
     print(f"\n{'='*60}")

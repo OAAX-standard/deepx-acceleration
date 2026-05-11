@@ -281,22 +281,6 @@ jobs:
           docker info
           docker images oaax-deepx-toolchain:latest
 
-      - name: Debug Python Docker access
-        env:
-          DEEPX_TOOLCHAIN_IMAGE: oaax-deepx-toolchain:latest
-        run: |
-          python3 -c "
-          import os, subprocess
-          img = os.environ.get('DEEPX_TOOLCHAIN_IMAGE', 'NOT SET')
-          print('DEEPX_TOOLCHAIN_IMAGE:', img)
-          r = subprocess.run(['docker', 'info'], capture_output=True, timeout=30)
-          print('docker info rc:', r.returncode)
-          if r.returncode != 0:
-              print('stderr:', r.stderr.decode()[:300])
-          r2 = subprocess.run(['docker', 'images', '-q', img], capture_output=True, text=True, timeout=30)
-          print('docker images output:', repr(r2.stdout.strip()))
-          "
-
       - name: Stage 1 — convert models and run toolchain tests
         env:
           DEEPX_TOOLCHAIN_IMAGE: oaax-deepx-toolchain:latest
