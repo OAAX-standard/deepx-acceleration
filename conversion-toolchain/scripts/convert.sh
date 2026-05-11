@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <zip file> <output dir>" >&2
