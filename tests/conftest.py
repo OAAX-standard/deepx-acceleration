@@ -130,11 +130,8 @@ def compiled_classification_models() -> dict:
         if dxnn.exists():
             result[name] = dxnn
             continue
-        try:
-            onnx = Path(download_model(name, str(onnx_dir)))
-            result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
-        except Exception as e:
-            print(f"\nWarning: skipping {name}: {e}")
+        onnx = Path(download_model(name, str(onnx_dir)))
+        result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
 
     return result
 
@@ -162,10 +159,7 @@ def compiled_yolo_models() -> dict:
         if dxnn.exists():
             result[name] = dxnn
             continue
-        try:
-            onnx = Path(download_model(name, str(onnx_dir)))
-            result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
-        except Exception as e:
-            print(f"\nWarning: skipping {name}: {e}")
+        onnx = Path(download_model(name, str(onnx_dir)))
+        result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
 
     return result
