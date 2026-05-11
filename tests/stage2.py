@@ -27,18 +27,14 @@ RUNNER_BIN = RUNTIME_BUILD_DIR / "inference_runner"
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--models", nargs="+", metavar="NAME",
-                        help="Model names to run (default: all found in compiled_models/)")
-    parser.add_argument("--runs", type=int, default=100,
-                        help="Number of timed inference runs per model (default: 100)")
-    parser.add_argument("--warmup", type=int, default=10,
-                        help="Number of warmup runs (default: 10)")
-    parser.add_argument("--csv", metavar="FILE",
-                        help="Write results to a CSV file")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--models", nargs="+", metavar="NAME", help="Model names to run (default: all found in compiled_models/)"
+    )
+    parser.add_argument("--runs", type=int, default=100, help="Number of timed inference runs per model (default: 100)")
+    parser.add_argument("--warmup", type=int, default=10, help="Number of warmup runs (default: 10)")
+    parser.add_argument("--csv", metavar="FILE", help="Write results to a CSV file")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args()
 
 
@@ -58,11 +54,13 @@ def _discover_models(filter_names=None) -> list[dict]:
         if name not in TEST_MODELS:
             print(f"Warning: {name}.dxnn found but not in TEST_MODELS — skipping")
             continue
-        models.append({
-            "name": name,
-            "dxnn_path": dxnn,
-            "input_size": input_data_size(name),
-        })
+        models.append(
+            {
+                "name": name,
+                "dxnn_path": dxnn,
+                "input_size": input_data_size(name),
+            }
+        )
     return models
 
 
@@ -85,7 +83,8 @@ def _build_runner() -> bool:
     print("Building inference_runner ...")
     result = subprocess.run(
         ["bash", str(build_script)] + extra,
-        cwd=REPO_ROOT, env=env,
+        cwd=REPO_ROOT,
+        env=env,
     )
     return result.returncode == 0
 
@@ -94,10 +93,14 @@ def _run_model(model: dict, runs: int, warmup: int) -> dict | None:
     """Run inference_runner for one model. Returns result dict or None on failure."""
     cmd = [
         str(RUNNER_BIN),
-        "--model", str(model["dxnn_path"]),
-        "--input-size", str(model["input_size"]),
-        "--runs", str(runs),
-        "--warmup", str(warmup),
+        "--model",
+        str(model["dxnn_path"]),
+        "--input-size",
+        str(model["input_size"]),
+        "--runs",
+        str(runs),
+        "--warmup",
+        str(warmup),
         "--csv",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -126,13 +129,17 @@ def _run_model(model: dict, runs: int, warmup: int) -> dict | None:
 def _print_table(results: list[dict]) -> None:
     if not results:
         return
-    header = f"{'Model':<20} {'Runs':>5} {'Avg ms':>8} {'P50 ms':>8} {'P95 ms':>8} {'Min ms':>8} {'Max ms':>8} {'FPS':>8}"
+    header = (
+        f"{'Model':<20} {'Runs':>5} {'Avg ms':>8} {'P50 ms':>8} {'P95 ms':>8} {'Min ms':>8} {'Max ms':>8} {'FPS':>8}"
+    )
     print("\n" + "=" * len(header))
     print(header)
     print("-" * len(header))
     for r in results:
-        print(f"{r['model']:<20} {r['runs']:>5} {r['avg_ms']:>8.2f} {r['p50_ms']:>8.2f} "
-              f"{r['p95_ms']:>8.2f} {r['min_ms']:>8.2f} {r['max_ms']:>8.2f} {r['throughput_fps']:>8.1f}")
+        print(
+            f"{r['model']:<20} {r['runs']:>5} {r['avg_ms']:>8.2f} {r['p50_ms']:>8.2f} "
+            f"{r['p95_ms']:>8.2f} {r['min_ms']:>8.2f} {r['max_ms']:>8.2f} {r['throughput_fps']:>8.1f}"
+        )
     print("=" * len(header))
 
 
@@ -155,15 +162,16 @@ def main() -> int:
 
     results = []
     for model in models:
-        print(f"\nRunning {model['name']} (input_size={model['input_size']} bytes, "
-              f"runs={args.runs}, warmup={args.warmup}) ...")
+        print(
+            f"\nRunning {model['name']} (input_size={model['input_size']} bytes, "
+            f"runs={args.runs}, warmup={args.warmup}) ..."
+        )
         r = _run_model(model, args.runs, args.warmup)
         if r:
             results.append(r)
-            print(f"  avg={r['avg_ms']:.2f}ms  p95={r['p95_ms']:.2f}ms  "
-                  f"throughput={r['throughput_fps']:.1f} fps")
+            print(f"  avg={r['avg_ms']:.2f}ms  p95={r['p95_ms']:.2f}ms  " f"throughput={r['throughput_fps']:.1f} fps")
         else:
-            print(f"  FAILED")
+            print("  FAILED")
 
     _print_table(results)
 

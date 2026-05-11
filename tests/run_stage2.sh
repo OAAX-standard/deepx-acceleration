@@ -25,6 +25,7 @@ cd "$REPO_ROOT"
 
 # Activate virtualenv if present
 if [[ -f .venv/bin/activate ]]; then
+    # shellcheck source=/dev/null
     source .venv/bin/activate
 fi
 

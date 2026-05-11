@@ -127,9 +127,8 @@ def _export_yolo(model_name: str, meta: dict, dest: Path) -> None:
         from ultralytics import YOLO  # type: ignore
     except ImportError:
         raise RuntimeError(
-            f"ultralytics is required to export {model_name}. "
-            "Install with: pip install ultralytics"
-        )
+            f"ultralytics is required to export {model_name}. Install with: pip install ultralytics"
+        ) from None
 
     pt_name, batch, imgsz = (
         meta["pt_name"],
@@ -139,8 +138,7 @@ def _export_yolo(model_name: str, meta: dict, dest: Path) -> None:
 
     print(f"Exporting {pt_name} (batch={batch}, imgsz={imgsz}) to ONNX ...")
     model = YOLO(pt_name)
-    exported = model.export(format="onnx", imgsz=imgsz, batch=batch, opset=11,
-                            simplify=True, dynamic=False)
+    exported = model.export(format="onnx", imgsz=imgsz, batch=batch, opset=11, simplify=True, dynamic=False)
     if not exported or not Path(str(exported)).exists():
         raise RuntimeError(f"YOLO export produced no .onnx file for {model_name}")
 

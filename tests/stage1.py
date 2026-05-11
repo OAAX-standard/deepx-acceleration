@@ -23,7 +23,10 @@ TESTS_DIR = Path(__file__).parent
 
 def run_pytest(extra_args: list[str]) -> int:
     cmd = [
-        sys.executable, "-m", "pytest", "-v",
+        sys.executable,
+        "-m",
+        "pytest",
+        "-v",
         str(TESTS_DIR / "test_conversion.py"),
     ] + extra_args
     print(f"\n{'='*60}")
@@ -34,10 +37,8 @@ def run_pytest(extra_args: list[str]) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--yolo", action="store_true",
-                        help="Also convert YOLO models (requires ultralytics)")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--yolo", action="store_true", help="Also convert YOLO models (requires ultralytics)")
     args = parser.parse_args()
 
     # Always run classification models

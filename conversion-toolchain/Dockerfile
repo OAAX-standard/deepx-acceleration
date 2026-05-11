@@ -5,7 +5,7 @@ ENV TZ=Asia/Seoul
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y passwd libgl1 libglib2.0-0 unzip tzdata && \
+    apt-get install -y --no-install-recommends passwd libgl1 libglib2.0-0 unzip tzdata && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ >/etc/timezone && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

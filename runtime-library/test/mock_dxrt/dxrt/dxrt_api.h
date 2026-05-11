@@ -1,14 +1,14 @@
 #pragma once
 
-#include <vector>
-#include <memory>
-#include <string>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <thread>
-#include <chrono>
-#include <atomic>
+#include <vector>
 
 namespace dxrt {
 
@@ -16,9 +16,8 @@ enum DataType { FLOAT, UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64 
 
 class Tensor {
 public:
-    explicit Tensor(size_t size, int id = 0)
-        : data_buf_(malloc(size)), size_(size) {
-        if (data_buf_) memset(data_buf_, 0x42, size); // fill with pattern
+    explicit Tensor(size_t size, int id = 0) : data_buf_(malloc(size)), size_(size) {
+        if (data_buf_) memset(data_buf_, 0x42, size);  // fill with pattern
     }
     ~Tensor() { free(data_buf_); }
 
@@ -37,13 +36,9 @@ public:
     explicit InferenceEngine(const std::string &) {}
     InferenceEngine(const uint8_t *, size_t) {}
 
-    std::vector<uint64_t> GetOutputTensorSizes() {
-        return {1 * 3 * 224 * 224 * sizeof(float)};
-    }
+    std::vector<uint64_t> GetOutputTensorSizes() { return {1 * 3 * 224 * 224 * sizeof(float)}; }
 
-    uint64_t GetOutputSize() {
-        return 1 * 3 * 224 * 224 * sizeof(float);
-    }
+    uint64_t GetOutputSize() { return 1 * 3 * 224 * 224 * sizeof(float); }
 
     int RunAsync(uint8_t *, void *, void *outputs_ptr) {
         (void)outputs_ptr;
@@ -66,4 +61,4 @@ struct DeviceStatus {
     static int GetDeviceCount() { return 2; }
 };
 
-} // namespace dxrt
+}  // namespace dxrt

@@ -1,14 +1,15 @@
-#include "runtime_core.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <chrono>
+
 #include <algorithm>
+#include <chrono>
 #include <numeric>
-#include <vector>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include "runtime_core.h"
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
@@ -34,7 +35,10 @@ static Tensors *make_input(int id, size_t data_size) {
     t->id = id;
     t->num_tensors = 1;
     t->tensors = (TensorDescriptor *)calloc(1, sizeof(TensorDescriptor));
-    if (!t->tensors) { free(t); return nullptr; }
+    if (!t->tensors) {
+        free(t);
+        return nullptr;
+    }
 
     t->tensors[0].name = strdup("input");
     t->tensors[0].data_type = DATA_TYPE_FLOAT;
@@ -123,7 +127,11 @@ int main(int argc, char **argv) {
     // Warmup
     for (int i = 0; i < warmup; i++) {
         Tensors *inp = make_input(i, input_size);
-        if (!inp) { fprintf(stderr, "OOM\n"); runtime_cleanup(); return 1; }
+        if (!inp) {
+            fprintf(stderr, "OOM\n");
+            runtime_cleanup();
+            return 1;
+        }
         s = runtime_enqueue_input(0, inp);
         if (s != RUNTIME_STATUS_SUCCESS) {
             fprintf(stderr, "Enqueue failed during warmup: %s\n", runtime_get_error());
@@ -143,7 +151,11 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < num_runs; i++) {
         Tensors *inp = make_input(i, input_size);
-        if (!inp) { fprintf(stderr, "OOM\n"); runtime_cleanup(); return 1; }
+        if (!inp) {
+            fprintf(stderr, "OOM\n");
+            runtime_cleanup();
+            return 1;
+        }
 
         auto t0 = std::chrono::high_resolution_clock::now();
         s = runtime_enqueue_input(0, inp);
@@ -188,12 +200,13 @@ int main(int argc, char **argv) {
     if (dot != std::string::npos) model_name = model_name.substr(0, dot);
 
     if (csv_mode) {
-        printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n",
-               model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, fps);
+        printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n", model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms,
+               fps);
     } else {
-        printf("model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
-               "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
-               model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, fps);
+        printf(
+            "model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
+            "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
+            model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, fps);
     }
 
     return 0;

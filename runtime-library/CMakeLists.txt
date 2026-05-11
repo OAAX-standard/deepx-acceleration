@@ -69,8 +69,8 @@ set_target_properties(RuntimeLibrary PROPERTIES
 )
 
 # Include directories
-target_include_directories(RuntimeLibrary 
-    PUBLIC 
+target_include_directories(RuntimeLibrary
+    PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/include
 )
@@ -83,9 +83,9 @@ if (WIN32)
 endif()
 
 # Link libraries
-target_link_libraries(RuntimeLibrary 
-    PRIVATE 
-        dxrt 
+target_link_libraries(RuntimeLibrary
+    PRIVATE
+        dxrt
         Threads::Threads
 )
 
@@ -112,10 +112,4 @@ install(TARGETS RuntimeLibrary
 install(DIRECTORY include/
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
-)
-
-# Install auxiliary public headers that live under deps/include
-install(FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/include/tensors_struct.h
-    DESTINATION include
 )

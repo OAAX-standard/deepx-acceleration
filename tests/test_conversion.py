@@ -16,6 +16,7 @@ YOLO_MODELS = ["yolov8n", "yolo11n", "yolo11s"]
 # Classification models
 # ---------------------------------------------------------------------------
 
+
 class TestClassificationConversion:
     @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
     def test_dxnn_exists(self, compiled_classification_models, model_name):
@@ -53,6 +54,7 @@ class TestClassificationConversion:
 # ---------------------------------------------------------------------------
 # YOLO models
 # ---------------------------------------------------------------------------
+
 
 class TestYoloConversion:
     @pytest.mark.parametrize("model_name", YOLO_MODELS)

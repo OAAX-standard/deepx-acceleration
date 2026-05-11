@@ -172,4 +172,3 @@ Refer to the example command in Step 3 for how to generate this file.
 After successful conversion, you'll find in the `artifacts/` directory:
 - `*.dxnn`: The converted DeepX Neural Network (DXNN) model
 - `convert.log`: Detailed conversion log with timestamps and process information
-

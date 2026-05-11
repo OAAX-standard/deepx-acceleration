@@ -28,7 +28,9 @@ def _docker_image_available() -> bool:
             return False
         r = subprocess.run(
             ["docker", "images", "-q", DOCKER_IMAGE],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return bool(r.stdout.strip())
     except Exception:
@@ -62,34 +64,41 @@ def _convert_with_docker(
 
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "-v", f"{bundle}:/input/bundle.zip",
-                "-v", f"{docker_out}:/output",
-                "--entrypoint", "bash",
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{bundle}:/input/bundle.zip",
+                "-v",
+                f"{docker_out}:/output",
+                "--entrypoint",
+                "bash",
                 DOCKER_IMAGE,
-                "-c", "cd /app && /app/scripts/convert.sh /input/bundle.zip /output",
+                "-c",
+                "cd /app && /app/scripts/convert.sh /input/bundle.zip /output",
             ],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
 
         log_src = docker_out / "convert.log"
         if log_src.exists():
             import shutil
+
             shutil.copy(log_src, out_dir / "convert.log")
 
         if result.returncode != 0:
             raise RuntimeError(
-                f"Conversion failed for {model_name} (exit {result.returncode}):\n"
-                f"{result.stdout}\n{result.stderr}"
+                f"Conversion failed for {model_name} (exit {result.returncode}):\n" f"{result.stdout}\n{result.stderr}"
             )
 
         produced = list(docker_out.glob("*.dxnn"))
         if not produced:
-            raise RuntimeError(
-                f"Conversion for {model_name} succeeded but no .dxnn file was produced."
-            )
+            raise RuntimeError(f"Conversion for {model_name} succeeded but no .dxnn file was produced.")
 
         import shutil
+
         shutil.copy(produced[0], dxnn_path)
 
     return dxnn_path
@@ -103,8 +112,7 @@ def compiled_classification_models() -> dict:
     """
     if not _docker_image_available():
         pytest.skip(
-            f"Docker image '{DOCKER_IMAGE}' not available. "
-            f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
+            f"Docker image '{DOCKER_IMAGE}' not available. " f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
         )
 
     onnx_dir = COMPILED_DIR / "onnx"

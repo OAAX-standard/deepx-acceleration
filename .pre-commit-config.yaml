@@ -43,3 +43,7 @@ repos:
     rev: v2.12.0
     hooks:
       - id: hadolint-docker
+        args:
+          - --ignore=DL3008  # version pinning — not practical for internal build images
+          - --ignore=DL3003  # WORKDIR vs cd — would require significant restructuring
+          - --ignore=DL3009  # delete apt lists — handled at image cleanup stage

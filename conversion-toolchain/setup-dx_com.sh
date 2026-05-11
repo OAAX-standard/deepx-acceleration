@@ -49,15 +49,15 @@ if [[ -n "$DX_USERNAME" && -n "$DX_PASSWORD" ]]; then
     echo "Using credentials from environment variables"
 elif [[ -n "$DX_USERNAME" ]]; then
     echo "Username found in environment variable, prompting for password"
-    read -s -p "(developer.deepx.ai) Enter your password: " DX_PASSWORD
+    read -r -s -p "(developer.deepx.ai) Enter your password: " DX_PASSWORD
     echo
 elif [[ -n "$DX_PASSWORD" ]]; then
     echo "Password found in environment variable, prompting for username"
-    read -p "(developer.deepx.ai) Enter your username: " DX_USERNAME
+    read -r -p "(developer.deepx.ai) Enter your username: " DX_USERNAME
 else
     echo "No credentials found in environment variables, prompting for both"
-    read -p "(developer.deepx.ai) Enter your username: " DX_USERNAME
-    read -s -p "(developer.deepx.ai) Enter your password: " DX_PASSWORD
+    read -r -p "(developer.deepx.ai) Enter your username: " DX_USERNAME
+    read -r -s -p "(developer.deepx.ai) Enter your password: " DX_PASSWORD
     echo
 fi
 
@@ -107,34 +107,34 @@ if python3 "$DOWNLOADER_SCRIPT" \
     --download-url "$DX_COM_DOWNLOAD_URL" \
     --save-location "$TEMP_DOWNLOAD_DIR" \
     --expected-version "$DX_COM_VERSION"; then
-    
+
     echo "Download completed successfully"
-    
+
     # Find the downloaded file
     DOWNLOADED_FILE=$(find "$TEMP_DOWNLOAD_DIR" -name "*.tar.gz" | head -1)
     if [[ -z "$DOWNLOADED_FILE" ]]; then
         echo "Error: Could not find downloaded tar.gz file"
         exit 1
     fi
-    
+
     echo "Found downloaded file: $DOWNLOADED_FILE"
-    
+
     # Create extraction directory
     EXTRACT_DIR="dx_com_M1_v${DX_COM_VERSION}"
     echo "Creating extraction directory: $EXTRACT_DIR"
     rm -rf "$EXTRACT_DIR" 2>/dev/null || true
     mkdir "$EXTRACT_DIR"
-    
+
     echo "Extracting SDK file into $EXTRACT_DIR..."
     if tar -xzf "$DOWNLOADED_FILE" -C "$EXTRACT_DIR"; then
         echo "Extraction completed successfully"
-        
+
         # Organize extracted files - move required directories to root
         echo "Organizing extracted files..."
-        
+
         # Remove existing directories if they exist
         rm -rf dx_com sample calibration_dataset 2>/dev/null || true
-        
+
         # Find and move dx_com directory
         DX_COM_PATH=$(find "$EXTRACT_DIR" -type d -name "dx_com" | head -1)
         if [ -n "$DX_COM_PATH" ]; then
@@ -144,7 +144,7 @@ if python3 "$DOWNLOADER_SCRIPT" \
             echo "Error: Could not find dx_com directory in extracted files"
             exit 1
         fi
-        
+
         # Find and move sample directory
         SAMPLE_PATH=$(find "$EXTRACT_DIR" -type d -name "sample" | head -1)
         if [ -n "$SAMPLE_PATH" ]; then
@@ -153,7 +153,7 @@ if python3 "$DOWNLOADER_SCRIPT" \
         else
             echo "Warning: Could not find sample directory in extracted files"
         fi
-        
+
         # Find and move calibration_dataset directory
         CALIB_PATH=$(find "$EXTRACT_DIR" -type d -name "calibration_dataset" | head -1)
         if [ -n "$CALIB_PATH" ]; then
@@ -162,14 +162,14 @@ if python3 "$DOWNLOADER_SCRIPT" \
         else
             echo "Warning: Could not find calibration_dataset directory in extracted files"
         fi
-        
+
         # Clean up extraction directory and temporary files
         echo "Cleaning up temporary files..."
         rm -rf "$EXTRACT_DIR"
         rm -rf "$TEMP_DOWNLOAD_DIR"
-        
+
         echo "File organization completed successfully"
-        
+
     else
         echo "Error: Failed to extract SDK file"
         exit 1

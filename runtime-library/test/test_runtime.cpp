@@ -1,13 +1,14 @@
-#include "runtime_core.h"
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <thread>
-#include <vector>
-#include <unordered_set>
 #include <mutex>
-#include <atomic>
+#include <thread>
+#include <unordered_set>
+#include <vector>
+
+#include "runtime_core.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,8 +116,8 @@ static void test_single_request() {
     Tensors *output = nullptr;
     assert(runtime_retrieve_output(&out_model_id, &output, -1) == RUNTIME_STATUS_SUCCESS);
     assert(output != nullptr);
-    assert(output->id == 42);        // id propagation
-    assert(out_model_id == 0);       // model_id propagation
+    assert(output->id == 42);   // id propagation
+    assert(out_model_id == 0);  // model_id propagation
     assert(output->num_tensors == 1);
     assert(output->tensors[0].name != nullptr);
     assert(output->tensors[0].data_size > 0);
@@ -124,9 +125,8 @@ static void test_single_request() {
     assert(output->tensors[0].shape != nullptr);
     assert(output->tensors[0].data != nullptr);
 
-    printf("  output id=%d, model_id=%d, name=%s, rank=%d, data_size=%zu\n",
-           output->id, out_model_id, output->tensors[0].name,
-           output->tensors[0].rank, output->tensors[0].data_size);
+    printf("  output id=%d, model_id=%d, name=%s, rank=%d, data_size=%zu\n", output->id, out_model_id,
+           output->tensors[0].name, output->tensors[0].rank, output->tensors[0].data_size);
 
     free_output(output);
     assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);

@@ -94,7 +94,7 @@ chmod +x "$PKG_DIR/inference_runner"
 
 # Compiled models (preserve directory structure)
 find "$COMPILED_DIR" -name "*.dxnn" | while read -r dxnn; do
-    rel="${dxnn#$COMPILED_DIR/}"
+    rel="${dxnn#"$COMPILED_DIR"/}"
     dest="$PKG_DIR/compiled_models/$rel"
     mkdir -p "$(dirname "$dest")"
     cp "$dxnn" "$dest"

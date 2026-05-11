@@ -38,7 +38,7 @@ example_*_ubuntu*
 # Archive files
 *.zip
 *.tar.gz
-*.tar.bz2 
+*.tar.bz2
 # Python
 __pycache__/
 *.pyc
@@ -51,4 +51,3 @@ tests/compiled_models/
 
 # uv
 .venv/
-
