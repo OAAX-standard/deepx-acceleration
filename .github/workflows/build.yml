@@ -265,7 +265,7 @@ jobs:
 
       - name: Download runtime library
         run: |
-          dxrt_version=$(cat runtime-library/dxrt_version.txt)
+          dxrt_version="v$(cat runtime-library/dxrt_version.txt)"
           mkdir -p runtime-library/artifacts/x86_64-ubuntu22.04
           wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${{ env.version }}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
           tar xzf /tmp/library.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
