@@ -276,6 +276,11 @@ jobs:
           docker load -i /tmp/toolchain.tar
           rm /tmp/toolchain.tar
 
+      - name: Verify Docker and toolchain image
+        run: |
+          docker info
+          docker images oaax-deepx-toolchain:latest
+
       - name: Stage 1 — convert models and run toolchain tests
         run: |
           export DEEPX_TOOLCHAIN_IMAGE=oaax-deepx-toolchain:latest

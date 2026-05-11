@@ -23,14 +23,14 @@ DOCKER_IMAGE = os.environ.get("DEEPX_TOOLCHAIN_IMAGE", "deepx-conversion-toolcha
 
 def _docker_image_available() -> bool:
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=30)
         if r.returncode != 0:
             return False
         r = subprocess.run(
             ["docker", "images", "-q", DOCKER_IMAGE],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=30,
         )
         return bool(r.stdout.strip())
     except Exception:
