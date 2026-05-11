@@ -70,9 +70,25 @@ DeepX NPU (DX-M1 / DX-H1)
 
 ### Conversion Toolchain internals
 
-- Runs inside a Ubuntu 22.04 Docker container with DX-COM pre-installed.
+- Runs inside a Ubuntu 22.04 Docker container. DX-COM is **not** baked into the image — it is mounted at runtime from `conversion-toolchain/dx_com/` (populated by `setup-dx_com.sh`).
 - Input to conversion: a ZIP containing the ONNX model, a JSON config, and (optionally) a calibration dataset.
 - Main conversion script executed inside the container: `conversion-toolchain/scripts/convert.sh`.
+
+## Testing
+
+```bash
+# Stage 1 — convert ONNX models to DXNN (requires Docker + dx_com)
+uv run python tests/stage1.py
+
+# Stage 1 with YOLO models (requires ultralytics)
+uv run python tests/stage1.py --yolo
+
+# Stage 2 — run inference on compiled models (requires DeepX hardware)
+uv run python tests/stage2.py
+```
+
+- `DEEPX_TOOLCHAIN_IMAGE` — override the Docker image (default: `oaax-deepx-toolchain:latest`)
+- `DX_COM_PATH` — override the dx_com directory (default: `conversion-toolchain/dx_com`)
 
 ## CI/CD
 
@@ -80,8 +96,8 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `build-runtime.yml` | push/PR to `main` | Matrix build: Linux (x86_64 + aarch64, Ubuntu 20/22/24) and Windows x86_64 |
-| `build-toolchain.yml` | push/PR to `main` | Builds toolchain Docker image on a `hetzner` self-hosted runner |
+| `build.yml` | push/PR to `main` | Builds toolchain image, matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24, Windows x86_64), integration tests |
+| `lint.yml` | push/PR to `main` | Runs pre-commit hooks (ruff, clang-format, shellcheck, hadolint) |
 | `delete-temporary-artifacts.yml` | PR closed | Cleans up branch-scoped S3 artifacts |
 
 Artifacts are uploaded to an S3-compatible bucket. On `main` the version comes from the `VERSION` file; on feature branches the branch name is used as the version.
