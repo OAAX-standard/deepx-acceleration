@@ -288,6 +288,17 @@ jobs:
           path: tests/compiled_models/
           retention-days: 1
 
+      - name: Stage 2 — build inference runner and run inference tests
+        run: uv run python tests/stage2.py --csv tests/stage2_results.csv
+
+      - name: Upload stage2 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage2-results
+          path: tests/stage2_results.csv
+          if-no-files-found: ignore
+
       - name: Upload conversion logs
         if: always()
         uses: actions/upload-artifact@v4
