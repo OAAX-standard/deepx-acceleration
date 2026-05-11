@@ -28,16 +28,16 @@ def _docker_image_available() -> bool:
             print(f"\n[docker check] 'docker info' failed (rc={r.returncode}): {r.stderr.decode()[:300]}")
             return False
         r = subprocess.run(
-            ["docker", "images", "-q", DOCKER_IMAGE],
+            ["docker", "inspect", "--type=image", DOCKER_IMAGE],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        found = bool(r.stdout.strip())
-        if not found:
-            print(f"\n[docker check] image '{DOCKER_IMAGE}' not found. Available images:")
+        if r.returncode != 0:
+            print(f"\n[docker check] image '{DOCKER_IMAGE}' not found (docker inspect rc={r.returncode})")
+            print(f"\n[docker check] Available images:")
             subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], timeout=10)
-        return found
+        return r.returncode == 0
     except Exception as e:
         print(f"\n[docker check] exception: {type(e).__name__}: {e}")
         return False
