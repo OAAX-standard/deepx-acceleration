@@ -249,9 +249,10 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y docker.io python3 python3-pip s3cmd wget cmake g++
+          pip3 install uv
 
-      - name: Install Python dependencies
-        run: pip3 install -r tests/requirements.txt
+      - name: Set up Python environment
+        run: uv sync -q
 
       - name: Determine version
         run: |
@@ -278,7 +279,7 @@ jobs:
       - name: Stage 1 — convert models and run toolchain tests
         run: |
           export DEEPX_TOOLCHAIN_IMAGE=oaax-deepx-toolchain:latest
-          python3 tests/stage1.py
+          uv run python tests/stage1.py
 
       - name: Upload compiled models
         uses: actions/upload-artifact@v4

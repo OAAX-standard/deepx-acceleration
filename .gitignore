@@ -48,3 +48,7 @@ __pycache__/
 # Test artifacts
 tests/compiled_models/
 
+
+# uv
+.venv/
+
