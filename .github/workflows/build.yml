@@ -1,4 +1,7 @@
-name: Build OAAX runtimes
+name: Build
+
+permissions:
+  contents: none
 
 on:
   push:
@@ -9,8 +12,62 @@ on:
       - main
 
 jobs:
-  build-runtime-ubuntu:
+  build-toolchain:
     timeout-minutes: 10
+    runs-on: hetzner
+    container:
+      image: ubuntu:22.04
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install s3cmd
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y s3cmd docker.io
+
+      - name: Build conversion toolchain image
+        run: bash conversion-toolchain/build-toolchain.sh
+
+      - name: Configure s3cmd
+        run: |
+          cat > ~/.s3cfg <<EOF
+          [default]
+          access_key = ${{ secrets.S3_ACCESS_KEY }}
+          secret_key = ${{ secrets.S3_SECRET_KEY }}
+          bucket_location = us-east-1
+          host_base = ${{ secrets.S3_ENDPOINT_URL }}
+          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
+          use_https = True
+          EOF
+
+      - name: Determine version
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if [ -f VERSION ]; then
+              version=$(cat VERSION)
+            else
+              exit 1
+            fi
+          else
+            version=${{ github.head_ref }}
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Upload Docker image to S3
+        run: |
+          s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/oaax-deepx-toolchain.tar"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/latest/DEEPX/oaax-deepx-toolchain.tar"
+          fi
+
+  build-runtime-ubuntu:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -22,7 +79,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: true
@@ -78,7 +135,6 @@ jobs:
 
       - name: Upload runtimes to S3
         run: |
-          # get the path to the library file
           library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
           s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
@@ -95,7 +151,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: true
@@ -125,20 +181,21 @@ jobs:
           }
           if (-not $dxrtRoot) { throw "Could not find dx_rt SDK (include/ and lib/) under dx_rt_windows/m1/" }
           ./build-windows.ps1 -DxrtRoot $dxrtRoot -Configuration Release
+
       - name: Determine version
         id: version
         shell: pwsh
         run: |
-            if ("${{ github.ref }}" -eq "refs/heads/main") {
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
             if (Test-Path VERSION) {
               $version = Get-Content VERSION
             } else {
               throw "VERSION file missing"
             }
-            } else {
+          } else {
             $version = "${{ github.head_ref }}"
-            }
-            echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload runtimes to Custom S3-Compatible Bucket
         shell: pwsh
@@ -169,3 +226,71 @@ jobs:
           if ("${{ github.ref }}" -eq "refs/heads/main") {
             s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$latestTargetKey"
           }
+
+  integration-tests:
+    timeout-minutes: 30
+    runs-on: hetzner
+    needs: [build-toolchain, build-runtime-ubuntu]
+    container:
+      image: ubuntu:22.04
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    permissions:
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: true
+
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y docker.io python3 python3-pip s3cmd wget cmake g++
+
+      - name: Install Python dependencies
+        run: pip3 install -r tests/requirements.txt
+
+      - name: Determine version
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            version=$(cat VERSION)
+          else
+            version=${{ github.head_ref }}
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Download runtime library
+        run: |
+          dxrt_version=$(cat runtime-library/dxrt_version.txt)
+          mkdir -p runtime-library/artifacts/x86_64-ubuntu22.04
+          wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${{ env.version }}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
+          tar xzf /tmp/library.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
+
+      - name: Load toolchain Docker image
+        run: |
+          wget -q "https://oaax.nbg1.your-objectstorage.com/conversion-toolchain/${{ env.version }}/DEEPX/oaax-deepx-toolchain.tar" -O /tmp/toolchain.tar  # check-secrets-ignore: public artifact storage
+          docker load -i /tmp/toolchain.tar
+          rm /tmp/toolchain.tar
+
+      - name: Stage 1 — convert models and run toolchain tests
+        run: |
+          export DEEPX_TOOLCHAIN_IMAGE=oaax-deepx-toolchain:latest
+          python3 tests/stage1.py
+
+      - name: Upload compiled models
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-models
+          path: tests/compiled_models/
+          retention-days: 1
+
+      - name: Upload conversion logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversion-logs
+          path: tests/compiled_models/**/convert.log
+          if-no-files-found: warn

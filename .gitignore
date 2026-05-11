@@ -39,3 +39,12 @@ example_*_ubuntu*
 *.zip
 *.tar.gz
 *.tar.bz2 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+
+# Test artifacts
+tests/compiled_models/
+
