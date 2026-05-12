@@ -5,6 +5,7 @@ description = "Test suite for the OAAX DeepX Acceleration runtime and conversion
 requires-python = ">=3.8"
 dependencies = [
     "pytest>=7.0",
+    "ultralytics>=8.4.48",
 ]
 
 [project.optional-dependencies]
