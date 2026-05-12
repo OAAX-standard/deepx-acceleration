@@ -20,7 +20,6 @@ from tests.models import TEST_MODELS, download_model
 COMPILED_DIR = Path(__file__).parent / "compiled_models"
 DOCKER_IMAGE = os.environ.get("DEEPX_TOOLCHAIN_IMAGE", "oaax-deepx-toolchain:latest")
 _REPO_ROOT = Path(__file__).parent.parent
-DX_COM_PATH = Path(os.environ.get("DX_COM_PATH", str(_REPO_ROOT / "conversion-toolchain" / "dx_com")))
 
 
 def _docker_image_available() -> bool:
@@ -54,11 +53,6 @@ def _convert_with_docker(
     Convert one ONNX model to DXNN using the Docker toolchain image.
     Returns the path to the produced .dxnn file.
     """
-    if not DX_COM_PATH.is_dir():
-        raise RuntimeError(
-            f"dx_com not found at '{DX_COM_PATH}'. " f"Run conversion-toolchain/setup-dx_com.sh or set DX_COM_PATH."
-        )
-
     meta = TEST_MODELS[model_name]
     config = {"input_shapes": {meta["input_name"]: meta["input_shape"]}}
 
@@ -84,8 +78,6 @@ def _convert_with_docker(
                 f"{bundle}:/input/bundle.zip",
                 "-v",
                 f"{docker_out}:/output",
-                "-v",
-                f"{DX_COM_PATH}:/app/dx_com:ro",
                 "--entrypoint",
                 "bash",
                 DOCKER_IMAGE,
