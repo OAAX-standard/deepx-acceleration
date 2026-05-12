@@ -32,5 +32,8 @@ docker build \
 # Tag the versioned image as 'latest' so it can be used as the default tag
 docker tag "oaax-deepx-toolchain:${VERSION}" "oaax-deepx-toolchain:latest"
 
-# Save both the versioned tag and 'latest' so consumers can use either
-docker save "oaax-deepx-toolchain:${VERSION}" "oaax-deepx-toolchain:latest" -o "./artifacts/oaax-deepx-toolchain.tar"
+# Save both tags so loading the tarball restores the versioned and latest image names
+docker save \
+    "oaax-deepx-toolchain:${VERSION}" \
+    "oaax-deepx-toolchain:latest" \
+    -o "./artifacts/oaax-deepx-toolchain.tar"
