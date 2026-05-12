@@ -16,10 +16,10 @@ Stage 1 must be run first; its output (`tests/compiled_models/`) is consumed by 
 | Requirement | Notes |
 |---|---|
 | Docker | Must be running and accessible to the current user |
-| DeepX toolchain image | Default: `deepx-conversion-toolchain:22.04`. Override with `DEEPX_TOOLCHAIN_IMAGE=<image>` |
+| DeepX toolchain image | Default: `oaax-deepx-toolchain:latest`. Override with `DEEPX_TOOLCHAIN_IMAGE=<image>` |
 | Python 3.8+ | |
 | pytest | `pip install pytest` |
-| ultralytics | Optional — only needed for YOLO model export: `pip install ultralytics` |
+| ultralytics | Required for YOLO model export: `pip install ultralytics` |
 
 ### Stage 2
 
@@ -35,34 +35,29 @@ Stage 1 must be run first; its output (`tests/compiled_models/`) is consumed by 
 
 ## Running Stage 1 (conversion)
 
-### Convert classification models (SqueezeNet, ResNet18, MobileNetV2)
+### Convert all models (classification + YOLO)
 
 ```bash
-python3 tests/stage1.py
+uv run python tests/stage1.py
 ```
 
-### Also convert YOLO models (yolov8n, yolo11n, yolo11s)
+### Skip YOLO models
 
 ```bash
-python3 tests/stage1.py --yolo
+uv run python tests/stage1.py --no-yolo
 ```
-
-Requires `ultralytics`. YOLO `.pt` weights are downloaded automatically on first run.
 
 ### Run a single model via pytest
 
 ```bash
-DEEPX_TOOLCHAIN_IMAGE=deepx-conversion-toolchain:22.04 \
-  pytest tests/test_conversion.py -k "squeezenet" -v
+pytest tests/test_conversion.py -k "squeezenet" -v
 ```
 
 ### Using a different toolchain image
 
 ```bash
-DEEPX_TOOLCHAIN_IMAGE=oaax-deepx-toolchain:latest python3 tests/stage1.py
+DEEPX_TOOLCHAIN_IMAGE=my-custom-image:latest uv run python tests/stage1.py
 ```
-
-> **Note:** `oaax-deepx-toolchain` requires the DX-COM compiler to be mounted at `/app/dx_com` inside the container. `deepx-conversion-toolchain:22.04` has it built in.
 
 ### Output
 
@@ -144,21 +139,41 @@ yolo11n                100    12.44    12.37    14.91    11.23    16.08       80
 To run stage 2 on a machine that does not have the full repository:
 
 ```bash
-./tests/package_stage2.sh
+bash tests/package_stage2.sh
 ```
 
-This creates `deepx-stage2-<version>.tar.gz` containing:
-- `inference_runner` binary
-- `libRuntimeLibrary.so`
-- All compiled `.dxnn` models
-- `stage2.py` and `run_stage2.sh`
+This builds `libRuntimeLibrary.so` and `inference_runner` for **x86_64 and aarch64**, then bundles everything into `deepx-stage2-<version>.tar.gz`.
 
-Transfer the archive to the target machine and run:
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ubuntu-version <ver>` | `20.04` | Ubuntu version to build against (20.04 gives widest glibc compatibility) |
+| `--output <path>` | `deepx-stage2-<version>.tar.gz` | Output archive path |
+
+Example — target Ubuntu 24.04:
+
+```bash
+bash tests/package_stage2.sh --ubuntu-version 24.04
+```
+
+### Prerequisites
+
+- `g++-aarch64-linux-gnu` for aarch64 cross-compile: `sudo apt-get install g++-aarch64-linux-gnu`
+- Compiled `.dxnn` models in `tests/compiled_models/` (run stage 1 first)
+
+### On the target machine
 
 ```bash
 tar -xzf deepx-stage2-<version>.tar.gz
 cd deepx-stage2-<version>
-./run_stage2.sh
+./run_stage2.sh          # auto-detects x86_64 or aarch64
+```
+
+With options:
+
+```bash
+MODELS="yolo11n" RUNS=200 CSV=results.csv ./run_stage2.sh
 ```
 
 ---
@@ -209,7 +224,7 @@ Add an entry to `TEST_MODELS` using `pt_name` instead of `url`:
 Then add the model name to the `compiled_yolo_models` fixture in `tests/conftest.py` and re-run:
 
 ```bash
-python3 tests/stage1.py --yolo
+uv run python tests/stage1.py
 ```
 
 ---
