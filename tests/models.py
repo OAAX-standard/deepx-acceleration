@@ -6,7 +6,7 @@ Each entry in TEST_MODELS provides:
   - filename:      name used when saving the ONNX file locally
   - input_name:    name of the model's input tensor (needed for dx_com config.json)
   - input_shape:   [N, C, H, W] shape
-  - input_dtype:   element type (always float32 here)
+  - input_dtype:   element type of the compiled model's input (always uint8 after dx_com)
   - task:          "image_classification" or "object_detection"
 """
 
@@ -27,7 +27,7 @@ TEST_MODELS = {
         "filename": "squeezenet.onnx",
         "input_name": "data_0",
         "input_shape": [1, 3, 224, 224],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "image_classification",
     },
     "resnet18": {
@@ -35,7 +35,7 @@ TEST_MODELS = {
         "filename": "resnet18.onnx",
         "input_name": "data",
         "input_shape": [1, 3, 224, 224],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "image_classification",
     },
     "mobilenetv2": {
@@ -43,7 +43,7 @@ TEST_MODELS = {
         "filename": "mobilenetv2.onnx",
         "input_name": "data",
         "input_shape": [1, 3, 224, 224],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "image_classification",
     },
     "yolov8n": {
@@ -51,7 +51,7 @@ TEST_MODELS = {
         "filename": "yolov8n.onnx",
         "input_name": "images",
         "input_shape": [1, 3, 640, 640],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "object_detection",
     },
     "yolo11n": {
@@ -59,7 +59,7 @@ TEST_MODELS = {
         "filename": "yolo11n.onnx",
         "input_name": "images",
         "input_shape": [1, 3, 640, 640],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "object_detection",
     },
     "yolo11s": {
@@ -67,7 +67,7 @@ TEST_MODELS = {
         "filename": "yolo11s.onnx",
         "input_name": "images",
         "input_shape": [1, 3, 640, 640],
-        "input_dtype": "float32",
+        "input_dtype": "uint8",
         "task": "object_detection",
     },
 }

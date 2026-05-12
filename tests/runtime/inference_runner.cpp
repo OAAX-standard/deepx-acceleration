@@ -41,7 +41,7 @@ static Tensors *make_input(int id, size_t data_size) {
     }
 
     t->tensors[0].name = strdup("input");
-    t->tensors[0].data_type = DATA_TYPE_FLOAT;
+    t->tensors[0].data_type = DATA_TYPE_UINT8;
     t->tensors[0].rank = 0;
     t->tensors[0].shape = nullptr;
     t->tensors[0].data_size = data_size;
