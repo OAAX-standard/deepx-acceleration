@@ -42,6 +42,10 @@ add_executable(inference_runner inference_runner.cpp)
 target_include_directories(inference_runner PRIVATE ${RUNTIME_INCLUDE_DIR})
 target_link_libraries(inference_runner PRIVATE ${RUNTIME_LIB} Threads::Threads)
 
+# libRuntimeLibrary.so depends on libdxrt which is only present on target
+# hardware — allow unresolved transitive symbols at link time.
+target_link_options(inference_runner PRIVATE "-Wl,--allow-shlib-undefined")
+
 # Use $ORIGIN so the binary finds libRuntimeLibrary.so from its own directory
 set_target_properties(inference_runner PROPERTIES
     BUILD_RPATH  "$ORIGIN"

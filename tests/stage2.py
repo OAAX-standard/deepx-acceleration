@@ -10,6 +10,7 @@ Usage:
 
 Environment:
     DEEPX_RUNTIME_LIB_DIR   Override path to directory containing libRuntimeLibrary.so
+    DEEPX_RUNNER_DIR        Override path to directory containing the inference_runner binary
 """
 
 import argparse
@@ -22,7 +23,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).parent
 REPO_ROOT = TESTS_DIR.parent
 COMPILED_DIR = TESTS_DIR / "compiled_models"
-RUNTIME_BUILD_DIR = TESTS_DIR / "runtime" / "build"
+RUNTIME_BUILD_DIR = Path(os.environ.get("DEEPX_RUNNER_DIR", str(TESTS_DIR / "runtime" / "build")))
 RUNNER_BIN = RUNTIME_BUILD_DIR / "inference_runner"
 
 
