@@ -4,7 +4,8 @@ ENV TZ=Asia/Seoul
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends unzip tzdata && \
+    apt-get install -y --no-install-recommends unzip tzdata \
+        libxcb1 libx11-6 libgl1 libglib2.0-0 && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

@@ -106,25 +106,23 @@ tar xfz calibration_dataset.tar.gz --strip-components=1 -C calibration_dataset/
 rm calibration_dataset.tar.gz
 ```
 
-Other available sample models: `MobileNetV2-1`, `YOLOV5S_Face-1`
+> ⚠️ **Sample JSON update required**: The downloaded sample JSON currently uses an environment-specific `dataset_path` such as `"/mnt/datasets/COCO"`. If you use the downloaded `calibration_dataset/` folder from the example above, update the JSON file so that `dataset_path` is `"./calibration_dataset"` before creating the ZIP archive.
+
+Example:
+```json
+"dataset_path": "./calibration_dataset"
+```
 
 #### Example: Create a ZIP archive from sample files
 
 ```bash
 mkdir -p artifacts
-mkdir -p temp_zip
-cp sample/YOLOV5S-1.onnx temp_zip/
-cp sample/YOLOV5S-1.json temp_zip/
-cp -r calibration_dataset temp_zip/
-
-cd temp_zip
-zip -r ../artifacts/YOLOV5S-1.zip *
-cd ..
-rm -rf temp_zip
+rm -f artifacts/YOLOV5S-1.zip
+(cd sample && zip -j ../artifacts/YOLOV5S-1.zip YOLOV5S-1.onnx YOLOV5S-1.json)
+zip -r artifacts/YOLOV5S-1.zip calibration_dataset
 ```
 
-> ⚠️ **Note**: Be sure to use `*` instead of `.` in the `zip` command.  
-Using `.` will include the current directory itself in the archive, resulting in an incorrect structure, which may break the converter.
+> ⚠️ **Note**: The first command uses `-j` so the ONNX and JSON files are stored at the ZIP root. The second command adds the `calibration_dataset/` directory with its folder name preserved.
 
 ---
 
@@ -136,8 +134,7 @@ Once the Docker image is built and your model is prepared as a `.zip` archive, y
 ```bash
 docker run -v ./artifacts:/app/artifacts oaax-deepx-toolchain:latest /app/artifacts/YOLOV5S-1.zip /app/artifacts
 ```
-> ⚠️ **Note**: The file `YOLOV5S-1.zip` must exist under the `./artifacts` directory.  
-Refer to the example command in Step 2 for how to generate this file.
+> ⚠️ **Note**: Run this command from the `conversion-toolchain/` directory so that `./artifacts` resolves correctly on the host. The file `YOLOV5S-1.zip` must exist under that `./artifacts` directory. Refer to the example command in Step 2 for how to generate this file.
 
 ######  Command Breakdown
 - `-v ./artifacts:/app/artifacts`: Mounts the `artifacts/` directory from the host machine to `/app/artifacts` inside the Docker container
