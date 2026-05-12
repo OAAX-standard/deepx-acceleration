@@ -60,6 +60,7 @@ def _discover_models(filter_names=None) -> list[dict]:
                 "name": name,
                 "dxnn_path": dxnn,
                 "input_size": input_data_size(name),
+                "input_shape": TEST_MODELS[name]["input_shape"],
             }
         )
     return models
@@ -92,12 +93,15 @@ def _build_runner() -> bool:
 
 def _run_model(model: dict, runs: int, warmup: int) -> dict | None:
     """Run inference_runner for one model. Returns result dict or None on failure."""
+    shape_str = ",".join(str(d) for d in model["input_shape"])
     cmd = [
         str(RUNNER_BIN),
         "--model",
         str(model["dxnn_path"]),
         "--input-size",
         str(model["input_size"]),
+        "--input-shape",
+        shape_str,
         "--runs",
         str(runs),
         "--warmup",

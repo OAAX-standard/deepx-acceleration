@@ -2,6 +2,7 @@
 
 #include <dxrt/dxrt_api.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <stdio.h>
 #include <string.h>
@@ -201,10 +202,25 @@ static void wait_loop() {
             job_data_queue.pop();
         }
 
+        spdlog::trace("[wait_loop] calling Wait for job_id={} request_id={}", job_data.job_id,
+                      job_data.request_id);
         try {
             job_data.dxrt_outputs = inference_engine->Wait(job_data.job_id);
+            spdlog::trace("[wait_loop] Wait completed job_id={} request_id={} num_outputs={}", job_data.job_id,
+                          job_data.request_id, job_data.dxrt_outputs.size());
+        } catch (const std::exception &e) {
+            spdlog::error("[wait_loop] Wait failed job_id={} request_id={}: {}", job_data.job_id,
+                          job_data.request_id, e.what());
+            if (job_data.input_tensors) deep_free_tensors(job_data.input_tensors);
+            if (job_data.outputs_ptr) {
+                std::lock_guard<std::mutex> lock(outputs_pool_mutex);
+                outputs_ptr_pool.push(job_data.outputs_ptr);
+                outputs_pool_cv.notify_one();
+            }
+            continue;
         } catch (...) {
-            spdlog::error("[wait_loop] Failed to wait for outputs. job_id: {}", job_data.job_id);
+            spdlog::error("[wait_loop] Wait failed job_id={} request_id={}: unknown exception", job_data.job_id,
+                          job_data.request_id);
             if (job_data.input_tensors) deep_free_tensors(job_data.input_tensors);
             if (job_data.outputs_ptr) {
                 std::lock_guard<std::mutex> lock(outputs_pool_mutex);
@@ -223,6 +239,8 @@ static void wait_loop() {
             std::lock_guard<std::mutex> lock(output_queue_mutex);
             output_queue.push(job_data);
             output_queue_cv.notify_one();
+            spdlog::trace("[wait_loop] pushed job_id={} request_id={} to output_queue (queue_size={})",
+                          job_data.job_id, job_data.request_id, output_queue.size());
         }
     }
 }
@@ -238,9 +256,13 @@ RuntimeStatus runtime_init(Config config) {
     }
 
     try {
-        logger = spdlog::basic_logger_mt(runtime_get_name(), "runtime.log");
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("runtime.log", true);
+        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        logger = std::make_shared<spdlog::logger>(runtime_get_name(),
+                                                  spdlog::sinks_init_list{file_sink, stderr_sink});
         spdlog::set_default_logger(logger);
-        spdlog::set_level(spdlog::level::info);
+        spdlog::set_level(spdlog::level::trace);
+        spdlog::flush_on(spdlog::level::trace);
         spdlog::info("Initializing the runtime environment");
     } catch (const spdlog::spdlog_ex &ex) {
         printf("Warning: Failed to create logger: %s, continuing without file logging\n", ex.what());
@@ -368,9 +390,14 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         return RUNTIME_STATUS_INVALID_TENSOR;
     }
 
+    spdlog::trace("[enqueue] request_id={} model_id={} input_data_size={}", input_tensors->id, model_id,
+                  input_tensors->tensors[0].data_size);
+
     void *outputs_ptr = nullptr;
     {
         std::unique_lock<std::mutex> lock(outputs_pool_mutex);
+        spdlog::trace("[enqueue] waiting for output buffer (pool_size={} pool_capacity={})",
+                      outputs_ptr_pool.size(), OUTPUTS_POOL_CAPACITY);
         outputs_pool_cv.wait(lock, []() { return !outputs_ptr_pool.empty() || stop_wait_thread.load(); });
         if (stop_wait_thread.load() && outputs_ptr_pool.empty()) {
             g_last_error = "Runtime is shutting down";
@@ -378,14 +405,17 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         }
         outputs_ptr = outputs_ptr_pool.front();
         outputs_ptr_pool.pop();
+        spdlog::trace("[enqueue] acquired output buffer (pool_size_remaining={})", outputs_ptr_pool.size());
     }
 
     int job_id = -1;
     try {
+        spdlog::trace("[enqueue] calling RunAsync for request_id={}", input_tensors->id);
         job_id =
             inference_engine->RunAsync(static_cast<uint8_t *>(input_tensors->tensors[0].data), nullptr, outputs_ptr);
+        spdlog::trace("[enqueue] RunAsync returned job_id={} for request_id={}", job_id, input_tensors->id);
     } catch (const std::exception &e) {
-        spdlog::error("[enqueue_input] Failed to run inference: {}", e.what());
+        spdlog::error("[enqueue] RunAsync failed for request_id={}: {}", input_tensors->id, e.what());
         g_last_error = std::string("Inference failed: ") + e.what();
         {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
@@ -406,6 +436,8 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         std::unique_lock<std::mutex> lock(job_data_queue_mutex);
         job_data_queue.push(job_data);
         job_data_queue_cv.notify_one();
+        spdlog::trace("[enqueue] pushed job_id={} request_id={} to job_data_queue (queue_size={})",
+                      job_id, job_data.request_id, job_data_queue.size());
     }
 
     return RUNTIME_STATUS_SUCCESS;
@@ -424,6 +456,8 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
         return RUNTIME_STATUS_NOT_INITIALIZED;
     }
 
+    spdlog::trace("[retrieve] called timeout_ms={}", timeout_ms);
+
     JobData job_data{};
     {
         std::unique_lock<std::mutex> lock(output_queue_mutex);
@@ -439,6 +473,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
             // Timed wait
             bool got = output_queue_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), predicate);
             if (!got) {
+                spdlog::trace("[retrieve] timed out after {}ms", timeout_ms);
                 return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
             }
         } else {
@@ -452,6 +487,8 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
 
         job_data = output_queue.front();
         output_queue.pop();
+        spdlog::trace("[retrieve] dequeued job_id={} request_id={} (output_queue_size={})",
+                      job_data.job_id, job_data.request_id, output_queue.size());
     }
 
     Tensors *result = create_output_tensors(job_data.request_id);
@@ -489,6 +526,8 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     if (model_id) {
         *model_id = job_data.model_id;
     }
+    spdlog::trace("[retrieve] returning output for request_id={} model_id={}", job_data.request_id,
+                  job_data.model_id);
     return RUNTIME_STATUS_SUCCESS;
 }
 

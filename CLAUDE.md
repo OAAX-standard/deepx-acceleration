@@ -77,11 +77,8 @@ DeepX NPU (DX-M1 / DX-H1)
 ## Testing
 
 ```bash
-# Stage 1 — convert all models to DXNN (requires Docker + dx_com + ultralytics)
+# Stage 1 — convert classification models to DXNN (requires Docker + dx_com)
 uv run python tests/stage1.py
-
-# Stage 1 without YOLO models
-uv run python tests/stage1.py --no-yolo
 
 # Stage 2 — run inference on compiled models (requires DeepX hardware)
 uv run python tests/stage2.py

@@ -1,56 +1,78 @@
 # DeepX Acceleration — Test Suite
 
-This directory contains a two-stage test suite for the DeepX OAAX runtime.
+A two-stage test pipeline for the DeepX OAAX runtime:
 
-- **Stage 1** converts ONNX models to DXNN format using the DeepX toolchain Docker image and verifies the outputs with pytest.
-- **Stage 2** loads compiled DXNN models through the OAAX runtime library and measures inference latency and throughput.
+- **Stage 1** converts ONNX models to DXNN format via the DeepX toolchain Docker image.
+- **Stage 2** loads compiled DXNN models through the OAAX runtime library on real DeepX hardware and measures inference latency and throughput.
 
-Stage 1 must be run first; its output (`tests/compiled_models/`) is consumed by Stage 2.
+Stage 1 must run before Stage 2 — its output (`tests/compiled_models/`) is the input to Stage 2.
+
+---
+
+## Quick start
+
+```bash
+# 1. Convert models (requires Docker + toolchain image)
+uv run python tests/stage1.py
+
+# 2. Run inference (requires DeepX hardware + built runtime library)
+./tests/run_stage2.sh
+
+# 3. Unit tests — no hardware or Docker needed
+pytest tests/test_models.py -v
+```
+
+---
+
+## Models
+
+The suite tests three image classification models from the DeepX Model Zoo:
+
+| Name | ONNX source | Input shape |
+|---|---|---|
+| MobileNetV1 | `sdk.deepx.ai/modelzoo/onnx/MobileNetV1-1.onnx` | `[1,224,224,3]` |
+| MobileNetV2 | `sdk.deepx.ai/modelzoo/onnx/MobileNetV2-1.onnx` | `[1,224,224,3]` |
+| SqueezeNet1_1 | `sdk.deepx.ai/modelzoo/onnx/SqueezeNet1_1-3.onnx` | `[1,224,224,3]` |
+
+All input shapes are NHWC; all compiled models take `uint8` input.
 
 ---
 
 ## Requirements
 
-### Stage 1
+### Stage 1 (conversion)
 
 | Requirement | Notes |
 |---|---|
 | Docker | Must be running and accessible to the current user |
-| DeepX toolchain image | Default: `oaax-deepx-toolchain:latest`. Override with `DEEPX_TOOLCHAIN_IMAGE=<image>` |
-| Python 3.8+ | |
-| pytest | `pip install pytest` |
-| ultralytics | Required for YOLO model export: `pip install ultralytics` |
+| DeepX toolchain image | Default: `oaax-deepx-toolchain:latest` — build with `conversion-toolchain/build-toolchain.sh` |
+| Python 3.8+ with `pytest` | `pip install pytest` or use `uv` |
 
-### Stage 2
+### Stage 2 (inference)
 
 | Requirement | Notes |
 |---|---|
+| DeepX NPU hardware | DX-M1 or DX-H1 |
 | `libRuntimeLibrary.so` | Built from `runtime-library/` (see below) |
-| CMake 3.14+ | To build the `inference_runner` C++ binary |
-| C++11 compiler | gcc or clang |
+| CMake 3.14+ and a C++11 compiler | To build `inference_runner` |
 | Python 3.8+ | |
-| DeepX NPU hardware | DX-M1 or DX-H1 — stage 2 performs real inference |
 
 ---
 
-## Running Stage 1 (conversion)
-
-### Convert all models (classification + YOLO)
+## Stage 1 — Conversion
 
 ```bash
 uv run python tests/stage1.py
 ```
 
-### Skip YOLO models
+Extra arguments are forwarded to pytest:
 
 ```bash
-uv run python tests/stage1.py --no-yolo
-```
+# Convert only mobilenet models
+uv run python tests/stage1.py -k mobilenet -v
 
-### Run a single model via pytest
-
-```bash
-pytest tests/test_conversion.py -k "squeezenet" -v
+# Or invoke pytest directly
+pytest tests/test_conversion.py -v
 ```
 
 ### Using a different toolchain image
@@ -61,175 +83,140 @@ DEEPX_TOOLCHAIN_IMAGE=my-custom-image:latest uv run python tests/stage1.py
 
 ### Output
 
-Compiled models are written to `tests/compiled_models/`:
-
 ```
 tests/compiled_models/
-├── onnx/               # Downloaded / exported ONNX files
-├── squeezenet/
-│   ├── squeezenet.dxnn
+├── onnx/                        # Downloaded ONNX files and JSON configs
+├── calibration_dataset/         # Calibration images (downloaded once)
+├── mobilenetv1/
+│   ├── mobilenetv1.dxnn
 │   └── convert.log
-├── resnet18/
-│   └── ...
-└── yolo11n/
-    └── ...
+├── mobilenetv2/  ...
+└── squeezenet1_1/  ...
 ```
 
-Conversion is cached — re-running stage 1 skips models whose `.dxnn` already exists.
+Conversion is cached — re-running skips models whose `.dxnn` already exists.
 
 ---
 
-## Running Stage 2 (inference)
+## Stage 2 — Inference
 
-### Prerequisites: build the runtime library
-
-The runtime library must be built before stage 2 can run. On a machine with `dx_rt` available:
+### 1. Build the runtime library
 
 ```bash
 cd runtime-library
 ./build-runtimes.sh --ubuntu_version 22.04
 ```
 
-This produces `runtime-library/artifacts/x86_64-ubuntu22.04/libRuntimeLibrary.so`. The stage 2 build script discovers it automatically.
+This produces `runtime-library/artifacts/x86_64-ubuntu22.04/libRuntimeLibrary.so`.
 
-If the library lives elsewhere, set:
+### 2. Build `inference_runner`
+
+`run_stage2.sh` does this automatically on first run. To build manually:
 
 ```bash
-export DEEPX_RUNTIME_LIB_DIR=/path/to/dir/containing/libRuntimeLibrary.so
+bash tests/runtime/build-tests.sh
 ```
 
-### Run stage 2
+To target a specific Ubuntu version:
+
+```bash
+bash tests/runtime/build-tests.sh \
+    --runtime-lib-dir runtime-library/artifacts/x86_64-ubuntu24.04 \
+    --build-dir tests/runtime/build-x86_64
+```
+
+### 3. Run
 
 ```bash
 ./tests/run_stage2.sh
 ```
 
-This builds `inference_runner` on first run, then executes it against every `.dxnn` in `tests/compiled_models/`.
-
-### Configuration via environment variables
+### Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODELS` | all | Space-separated list of model names to run |
-| `RUNS` | 100 | Number of timed inference runs per model |
-| `WARMUP` | 10 | Number of warmup runs (excluded from metrics) |
+| `MODELS` | all | Space-separated model names to run |
+| `RUNS` | 100 | Timed inference runs per model |
+| `WARMUP` | 10 | Warmup runs (excluded from metrics) |
 | `CSV` | — | Path to append results in CSV format |
 | `DEEPX_RUNTIME_LIB_DIR` | auto-detected | Directory containing `libRuntimeLibrary.so` |
+| `DEEPX_RUNNER_DIR` | auto-detected | Directory containing `inference_runner` |
 
 Example:
 
 ```bash
-MODELS="yolo11n yolo11s" RUNS=200 CSV=results.csv ./tests/run_stage2.sh
+MODELS="mobilenetv1 mobilenetv2" RUNS=200 CSV=results.csv ./tests/run_stage2.sh
 ```
 
-### Output
+### Run via pytest
 
+```bash
+pytest tests/test_inference.py -v
 ```
-Model                 Runs   Avg ms   P50 ms   P95 ms   Min ms   Max ms   Throughput
---------------------------------------------------------------------------------
-squeezenet             100     3.21     3.18     4.02     2.91     5.14      311.5
-resnet18               100     4.87     4.83     5.91     4.41     7.02      205.3
-yolo11n                100    12.44    12.37    14.91    11.23    16.08       80.4
+
+Tests are skipped automatically if `inference_runner` is not built or no compiled models are found.
+
+---
+
+## Unit tests (no hardware or Docker)
+
+`test_models.py` validates the model metadata in `models.py` — no external dependencies:
+
+```bash
+pytest tests/test_models.py -v
 ```
+
+These checks run in CI on every push and are a good sanity check after adding a new model.
 
 ---
 
 ## Packaging Stage 2 for a remote machine
 
-To run stage 2 on a machine that does not have the full repository:
-
 ```bash
 bash tests/package_stage2.sh
 ```
 
-This builds `libRuntimeLibrary.so` and `inference_runner` for **x86_64 and aarch64**, then bundles everything into `deepx-stage2-<version>.tar.gz`.
-
-### Options
+Builds `libRuntimeLibrary.so` and `inference_runner` for **x86_64 and aarch64**, then bundles everything with the compiled DXNN models into a single archive. Already-built artifacts are reused automatically.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--ubuntu-version <ver>` | `20.04` | Ubuntu version to build against (20.04 gives widest glibc compatibility) |
+| `--ubuntu-version <ver>` | `20.04` | Ubuntu version (20.04 gives widest glibc compatibility) |
+| `--arch <arch>` | both | `x86_64` or `aarch64` (repeatable) |
 | `--output <path>` | `deepx-stage2-<version>.tar.gz` | Output archive path |
-
-Example — target Ubuntu 24.04:
-
-```bash
-bash tests/package_stage2.sh --ubuntu-version 24.04
-```
-
-### Prerequisites
-
-- `g++-aarch64-linux-gnu` for aarch64 cross-compile: `sudo apt-get install g++-aarch64-linux-gnu`
-- Compiled `.dxnn` models in `tests/compiled_models/` (run stage 1 first)
 
 ### On the target machine
 
 ```bash
 tar -xzf deepx-stage2-<version>.tar.gz
 cd deepx-stage2-<version>
-./run_stage2.sh          # auto-detects x86_64 or aarch64
-```
-
-With options:
-
-```bash
-MODELS="yolo11n" RUNS=200 CSV=results.csv ./run_stage2.sh
+./run_stage2.sh
 ```
 
 ---
 
-## Adding new models
+## Adding a new model
 
-### Classification / regression models (direct ONNX download)
-
-Add an entry to `TEST_MODELS` in `tests/models.py`:
+1. Add an entry to `TEST_MODELS` in `tests/models.py`:
 
 ```python
 "my_model": {
-    "url": "https://example.com/my_model.onnx",
+    "url": "https://sdk.deepx.ai/modelzoo/onnx/MyModel-1.onnx",
+    "json_url": "https://sdk.deepx.ai/modelzoo/json/MyModel-1.json",
     "filename": "my_model.onnx",
-    "input_name": "input",        # tensor name as seen by dx_com
-    "input_shape": [1, 3, 224, 224],
-    "input_dtype": "float32",
-    "task": "image_classification",
+    "input_name": "input",
+    "input_shape": [1, 224, 224, 3],   # NHWC
+    "input_dtype": "uint8",
 },
 ```
 
-The `input_name` must match the model's actual ONNX input tensor name. If unsure, inspect with:
-
-```python
-import onnx
-m = onnx.load("my_model.onnx")
-for inp in m.graph.input:
-    print(inp.name, [d.dim_value for d in inp.type.tensor_type.shape.dim])
-```
-
-Then add the model name to the `compiled_classification_models` fixture in `tests/conftest.py` and re-run stage 1.
-
-### YOLO models (ultralytics export)
-
-Add an entry to `TEST_MODELS` using `pt_name` instead of `url`:
-
-```python
-"yolo11m": {
-    "pt_name": "yolo11m.pt",
-    "filename": "yolo11m.onnx",
-    "input_name": "images",
-    "input_shape": [1, 3, 640, 640],
-    "input_dtype": "float32",
-    "task": "object_detection",
-},
-```
-
-Then add the model name to the `compiled_yolo_models` fixture in `tests/conftest.py` and re-run:
-
-```bash
-uv run python tests/stage1.py
-```
+2. Re-run stage 1 — the new model is picked up automatically by all tests.
 
 ---
 
-## Known limitations
+## Test file reference
 
-- **yolov8n** fails to compile with a `CODEGEN` error from DX-COM — the model uses operators not supported by the current hardware/compiler version. It is automatically skipped by the test suite.
-- **Stage 2 without hardware**: if `libRuntimeLibrary.so` is built against the mock `dxrt` (as in CI), inference runs but latency numbers reflect a simulated 5–15ms delay rather than real NPU performance.
+| File | What it tests | Requires |
+|---|---|---|
+| `test_models.py` | `models.py` metadata (keys, shapes, dtypes, sizes) | Nothing |
+| `test_conversion.py` | Stage 1 — DXNN files produced and convert.log shows success | Docker + toolchain image |
+| `test_inference.py` | Stage 2 — inference_runner exits 0, metrics are valid | DeepX hardware + built runtime |

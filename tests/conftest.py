@@ -1,12 +1,11 @@
 """
 Shared session fixtures for the DeepX OAAX test suite.
 
-converted_models downloads all configured ONNX models and converts them to
+compiled_models downloads classification ONNX models and converts them to
 DXNN format via the Docker toolchain image, caching to tests/compiled_models/.
 Stage 1 populates this cache; Stage 2 reads from it without re-converting.
 """
 
-import json
 import os
 import shutil
 import subprocess
@@ -17,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.models import TEST_MODELS, download_model
+from tests.models import TEST_MODELS, download_calibration_dataset, download_model, download_model_json
 
 COMPILED_DIR = Path(__file__).parent / "compiled_models"
 DOCKER_IMAGE = os.environ.get("DEEPX_TOOLCHAIN_IMAGE", "oaax-deepx-toolchain:latest")
@@ -49,17 +48,14 @@ def _docker_image_available() -> bool:
 def _convert_with_docker(
     model_name: str,
     onnx_path: Path,
+    json_path: Path,
+    calib_dir: Path,
     out_dir: Path,
 ) -> Path:
     """
     Convert one ONNX model to DXNN using the Docker toolchain image.
     Returns the path to the produced .dxnn file.
     """
-    meta = TEST_MODELS[model_name]
-    # input_shape is NHWC [N,H,W,C]; dx_com expects the ONNX NCHW shape [N,C,H,W]
-    n, h, w, c = meta["input_shape"]
-    config = {"input_shapes": {meta["input_name"]: [n, c, h, w]}}
-
     out_dir.mkdir(parents=True, exist_ok=True)
     dxnn_path = out_dir / f"{model_name}.dxnn"
 
@@ -71,7 +67,10 @@ def _convert_with_docker(
 
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(onnx_path, arcname=f"{model_name}.onnx")
-            z.writestr("config.json", json.dumps(config))
+            z.write(json_path, arcname=json_path.name)
+            for f in sorted(calib_dir.rglob("*")):
+                if f.is_file():
+                    z.write(f, arcname=Path("calibration_dataset") / f.relative_to(calib_dir))
 
         # Use docker create + cp + start instead of bind mounts so this works
         # in DinD CI environments where the host Docker daemon can't resolve
@@ -123,9 +122,9 @@ def _convert_with_docker(
 
 
 @pytest.fixture(scope="session")
-def compiled_classification_models() -> dict:
+def compiled_models() -> dict:
     """
-    Download and convert classification models (SqueezeNet, ResNet18, MobileNetV2).
+    Download and convert classification models (MobileNetV1, MobileNetV2, SqueezeNet1_1).
     Returns {model_name: Path-to-dxnn}.
     """
     if not _docker_image_available():
@@ -135,43 +134,16 @@ def compiled_classification_models() -> dict:
 
     onnx_dir = COMPILED_DIR / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
+    calib_dir = Path(download_calibration_dataset(str(COMPILED_DIR)))
 
     result = {}
-    for name in ("squeezenet", "resnet18", "mobilenetv2"):
+    for name in TEST_MODELS:
         dxnn = COMPILED_DIR / name / f"{name}.dxnn"
         if dxnn.exists():
             result[name] = dxnn
             continue
         onnx = Path(download_model(name, str(onnx_dir)))
-        result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
-
-    return result
-
-
-@pytest.fixture(scope="session")
-def compiled_yolo_models() -> dict:
-    """
-    Export and convert YOLO models (yolov8n, yolo11n, yolo11s).
-    Requires ultralytics. Returns {model_name: Path-to-dxnn}.
-    """
-    if not _docker_image_available():
-        pytest.skip(f"Docker image '{DOCKER_IMAGE}' not available.")
-
-    try:
-        import ultralytics  # noqa: F401
-    except ImportError:
-        pytest.skip("ultralytics not installed — run: pip install ultralytics")
-
-    onnx_dir = COMPILED_DIR / "onnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-
-    result = {}
-    for name in ("yolov8n", "yolo11n", "yolo11s"):
-        dxnn = COMPILED_DIR / name / f"{name}.dxnn"
-        if dxnn.exists():
-            result[name] = dxnn
-            continue
-        onnx = Path(download_model(name, str(onnx_dir)))
-        result[name] = _convert_with_docker(name, onnx, COMPILED_DIR / name)
+        json_path = Path(download_model_json(name, str(onnx_dir)))
+        result[name] = _convert_with_docker(name, onnx, json_path, calib_dir, COMPILED_DIR / name)
 
     return result
