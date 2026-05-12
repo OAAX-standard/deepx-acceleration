@@ -59,7 +59,8 @@ def _convert_with_docker(
     out_dir.mkdir(parents=True, exist_ok=True)
     dxnn_path = out_dir / f"{model_name}.dxnn"
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # Use out_dir as base so Docker (via host socket in DinD CI) can resolve the path
+    with tempfile.TemporaryDirectory(dir=out_dir) as tmp:
         tmp_path = Path(tmp)
         bundle = tmp_path / "bundle.zip"
         docker_out = tmp_path / "output"
