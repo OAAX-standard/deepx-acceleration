@@ -56,8 +56,7 @@ def _convert_with_docker(
     """
     if not DX_COM_PATH.is_dir():
         raise RuntimeError(
-            f"dx_com not found at '{DX_COM_PATH}'. "
-            f"Run conversion-toolchain/setup-dx_com.sh or set DX_COM_PATH."
+            f"dx_com not found at '{DX_COM_PATH}'. " f"Run conversion-toolchain/setup-dx_com.sh or set DX_COM_PATH."
         )
 
     meta = TEST_MODELS[model_name]

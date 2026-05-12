@@ -59,7 +59,7 @@ echo "ONNX file: $onnx_file" | tee -a "$LOG_FILE"
 echo "JSON file: $json_file" | tee -a "$LOG_FILE"
 
 echo "Converting $onnx_file to DXNN" | tee -a "$LOG_FILE"
-cd "$WORK_DIR"
+cd "$WORK_DIR" || exit 1
 if ! dxcom -m "$onnx_file" -c "$json_file" -o "$2" 2>&1 \
   | tee >(perl -pe 's/\r/\n/g; s/\e\[[0-9;?]*[ -\/]*[@-~]//g' >> "$LOG_FILE"); then
   echo "Error: dxcom conversion failed." | tee -a "$LOG_FILE" >&2
