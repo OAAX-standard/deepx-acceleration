@@ -41,7 +41,7 @@ DX_USERNAME="your_username" DX_PASSWORD="your_password" ./setup-dx_com.sh
 
 ##### **Specifying expected version and download URL:**
 ```bash
-./setup-dx_com.sh --expected-version "2.0.0" --download-url "https://developer.deepx.ai/?files=MjQ1Mw=="
+./setup-dx_com.sh --expected-version "2.0.0" --download-url "https://developer.deepx.ai/download/?id=390"
 ```
 
 ###### Command Line Options
