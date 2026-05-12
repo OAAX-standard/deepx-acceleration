@@ -8,8 +8,10 @@ Stage 1 populates this cache; Stage 2 reads from it without re-converting.
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -59,7 +61,6 @@ def _convert_with_docker(
     out_dir.mkdir(parents=True, exist_ok=True)
     dxnn_path = out_dir / f"{model_name}.dxnn"
 
-    # Use out_dir as base so Docker (via host socket in DinD CI) can resolve the path
     with tempfile.TemporaryDirectory(dir=out_dir) as tmp:
         tmp_path = Path(tmp)
         bundle = tmp_path / "bundle.zip"
@@ -70,42 +71,49 @@ def _convert_with_docker(
             z.write(onnx_path, arcname=f"{model_name}.onnx")
             z.writestr("config.json", json.dumps(config))
 
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{bundle}:/input/bundle.zip",
-                "-v",
-                f"{docker_out}:/output",
-                "--entrypoint",
-                "bash",
-                DOCKER_IMAGE,
-                "-c",
-                "cd /app && /app/scripts/convert.sh /input/bundle.zip /output",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        # Use docker create + cp + start instead of bind mounts so this works
+        # in DinD CI environments where the host Docker daemon can't resolve
+        # paths from inside the CI container (/__w vs /home/github-runner/...).
+        container = f"deepx-convert-{model_name}-{uuid.uuid4().hex[:8]}"
+        result = None
+        try:
+            subprocess.run(
+                ["docker", "create", "--name", container, DOCKER_IMAGE, "/tmp/bundle.zip", "/tmp/output"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["docker", "cp", str(bundle), f"{container}:/tmp/bundle.zip"],
+                check=True,
+                capture_output=True,
+            )
+            result = subprocess.run(
+                ["docker", "start", "-a", container],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            subprocess.run(
+                ["docker", "cp", f"{container}:/tmp/output/.", str(docker_out)],
+                capture_output=True,
+            )
+        finally:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
 
         log_src = docker_out / "convert.log"
         if log_src.exists():
-            import shutil
-
             shutil.copy(log_src, out_dir / "convert.log")
 
-        if result.returncode != 0:
+        if result is None or result.returncode != 0:
             raise RuntimeError(
-                f"Conversion failed for {model_name} (exit {result.returncode}):\n" f"{result.stdout}\n{result.stderr}"
+                f"Conversion failed for {model_name} "
+                f"(exit {result.returncode if result else 'N/A'}):\n"
+                f"{result.stdout if result else ''}\n{result.stderr if result else ''}"
             )
 
         produced = list(docker_out.glob("*.dxnn"))
         if not produced:
             raise RuntimeError(f"Conversion for {model_name} succeeded but no .dxnn file was produced.")
-
-        import shutil
 
         shutil.copy(produced[0], dxnn_path)
 
