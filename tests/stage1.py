@@ -6,10 +6,10 @@ Runs pytest test suites that download models and convert them.
 Output goes to tests/compiled_models/.
 
 Usage:
-    python3 tests/stage1.py [--yolo]
+    python3 tests/stage1.py [--no-yolo]
 
 Options:
-    --yolo    Also convert YOLO models (requires ultralytics)
+    --no-yolo    Skip YOLO models (requires ultralytics by default)
 """
 
 import argparse
@@ -38,15 +38,14 @@ def run_pytest(extra_args: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--yolo", action="store_true", help="Also convert YOLO models (requires ultralytics)")
+    parser.add_argument("--no-yolo", action="store_true", help="Skip YOLO models")
     args = parser.parse_args()
 
-    # Always run classification models
     rc = run_pytest(["-k", "Classification"])
     if rc != 0:
         return rc
 
-    if args.yolo:
+    if not args.no_yolo:
         rc = run_pytest(["-k", "Yolo"])
 
     return rc
