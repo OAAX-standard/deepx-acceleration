@@ -6,9 +6,9 @@ if [ "$#" -ne 2 ]; then
   exit 1
 fi
 
-# Ensure the dx_com directory exists
-if [ ! -d "./dx_com" ]; then
-  echo "Error: dx_com directory not found. Please download it, unpack it, then mount it into the Docker container at /app/dx_com." >&2
+# Verify dxcom is installed
+if ! command -v dxcom &>/dev/null; then
+  echo "Error: dxcom command not found. Ensure dx_com is installed via pip." >&2
   exit 1
 fi
 
@@ -20,22 +20,24 @@ echo "Starting conversion at $CURRENT_TIME" | tee -a "$LOG_FILE"
 
 ZIP_FILE="$1"
 
-unzip "$ZIP_FILE"
+# Extract to a temporary working directory
+WORK_DIR=$(mktemp -d)
+unzip -q "$ZIP_FILE" -d "$WORK_DIR"
 
 onnx_file=""
 json_file=""
 onnx_count=0
 json_count=0
 
-for item in *; do
+for item in "$WORK_DIR"/*; do
   if [ -f "$item" ]; then
     case "${item##*.}" in
       onnx)
-        onnx_file=$(realpath "$item")
+        onnx_file="$item"
         ((onnx_count++))
         ;;
       json)
-        json_file=$(realpath "$item")
+        json_file="$item"
         ((json_count++))
         ;;
     esac
@@ -44,11 +46,13 @@ done
 
 if [ "$onnx_count" -ne 1 ]; then
   echo "Error: Expected exactly 1 ONNX file, but found $onnx_count." >&2
+  rm -rf "$WORK_DIR"
   exit 1
 fi
 
 if [ "$json_count" -ne 1 ]; then
   echo "Error: Expected exactly 1 JSON file, but found $json_count." >&2
+  rm -rf "$WORK_DIR"
   exit 1
 fi
 
@@ -56,7 +60,9 @@ echo "ONNX file: $onnx_file" | tee -a "$LOG_FILE"
 echo "JSON file: $json_file" | tee -a "$LOG_FILE"
 
 echo "Converting $onnx_file to DXNN" | tee -a "$LOG_FILE"
-./dx_com/dx_com -m "$onnx_file" -c "$json_file" -o "$2" | tee -a "$LOG_FILE"
+dxcom -m "$onnx_file" -c "$json_file" -o "$2" | tee -a "$LOG_FILE"
+
+rm -rf "$WORK_DIR"
 
 CURRENT_TIME=$(date "+%Y-%m-%d %H:%M:%S %Z")
 echo "Conversion finished at $CURRENT_TIME" | tee -a "$LOG_FILE"
