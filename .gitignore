@@ -10,6 +10,8 @@ calibration_dataset/
 
 # Build artifacts
 build/
+build-*/
+build-local/
 artifacts/
 
 # IDE files
