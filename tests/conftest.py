@@ -56,7 +56,9 @@ def _convert_with_docker(
     Returns the path to the produced .dxnn file.
     """
     meta = TEST_MODELS[model_name]
-    config = {"input_shapes": {meta["input_name"]: meta["input_shape"]}}
+    # input_shape is NHWC [N,H,W,C]; dx_com expects the ONNX NCHW shape [N,C,H,W]
+    n, h, w, c = meta["input_shape"]
+    config = {"input_shapes": {meta["input_name"]: [n, c, h, w]}}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     dxnn_path = out_dir / f"{model_name}.dxnn"

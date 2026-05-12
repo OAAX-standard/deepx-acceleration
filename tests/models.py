@@ -5,7 +5,7 @@ Each entry in TEST_MODELS provides:
   - url / pt_name: source for downloading or exporting the ONNX file
   - filename:      name used when saving the ONNX file locally
   - input_name:    name of the model's input tensor (needed for dx_com config.json)
-  - input_shape:   [N, C, H, W] shape
+  - input_shape:   [N, H, W, C] shape (NHWC — the compiled model's runtime format)
   - input_dtype:   element type of the compiled model's input (always uint8 after dx_com)
   - task:          "image_classification" or "object_detection"
 """
@@ -26,7 +26,7 @@ TEST_MODELS = {
         "url": "https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.0-7.onnx",
         "filename": "squeezenet.onnx",
         "input_name": "data_0",
-        "input_shape": [1, 3, 224, 224],
+        "input_shape": [1, 224, 224, 3],
         "input_dtype": "uint8",
         "task": "image_classification",
     },
@@ -34,7 +34,7 @@ TEST_MODELS = {
         "url": "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx",
         "filename": "resnet18.onnx",
         "input_name": "data",
-        "input_shape": [1, 3, 224, 224],
+        "input_shape": [1, 224, 224, 3],
         "input_dtype": "uint8",
         "task": "image_classification",
     },
@@ -42,7 +42,7 @@ TEST_MODELS = {
         "url": "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-7.onnx",
         "filename": "mobilenetv2.onnx",
         "input_name": "data",
-        "input_shape": [1, 3, 224, 224],
+        "input_shape": [1, 224, 224, 3],
         "input_dtype": "uint8",
         "task": "image_classification",
     },
@@ -50,7 +50,7 @@ TEST_MODELS = {
         "pt_name": "yolov8n.pt",
         "filename": "yolov8n.onnx",
         "input_name": "images",
-        "input_shape": [1, 3, 640, 640],
+        "input_shape": [1, 640, 640, 3],
         "input_dtype": "uint8",
         "task": "object_detection",
     },
@@ -58,7 +58,7 @@ TEST_MODELS = {
         "pt_name": "yolo11n.pt",
         "filename": "yolo11n.onnx",
         "input_name": "images",
-        "input_shape": [1, 3, 640, 640],
+        "input_shape": [1, 640, 640, 3],
         "input_dtype": "uint8",
         "task": "object_detection",
     },
@@ -66,7 +66,7 @@ TEST_MODELS = {
         "pt_name": "yolo11s.pt",
         "filename": "yolo11s.onnx",
         "input_name": "images",
-        "input_shape": [1, 3, 640, 640],
+        "input_shape": [1, 640, 640, 3],
         "input_dtype": "uint8",
         "task": "object_detection",
     },
