@@ -27,6 +27,7 @@ struct JobData {
     int model_id;
     int request_id;
     void *outputs_ptr;
+    void *input_buf;   // points into the input_buf_pool — returned to pool after Wait
     Tensors *input_tensors;
     std::vector<std::shared_ptr<dxrt::Tensor>> dxrt_outputs;
 };
@@ -41,12 +42,36 @@ static std::atomic<bool> g_initialized{false};
 static dxrt::InferenceEngine *inference_engine = nullptr;
 static std::vector<uint64_t> OutputTensorSizes;
 
+// TODO(multi-model): When supporting multiple models concurrently, each model
+// will have different input/output sizes.  The current global pools and
+// INPUT_BUF_SIZE must be refactored into a per-model context structure, e.g.:
+//   struct ModelContext {
+//       InferenceEngine *engine;
+//       std::queue<void*> input_buf_pool;
+//       std::queue<void*> outputs_ptr_pool;
+//       size_t input_buf_size;
+//       std::vector<uint64_t> output_tensor_sizes;
+//   };
+// TODO(pool-config): The pool capacity multiplier (currently ×10) is derived
+// from observation of DX-RT DMA registration limits.  Consider making it
+// configurable via runtime Config or an environment variable to accommodate
+// different hardware revisions or higher pipeline depths.
 static size_t OUTPUTS_POOL_CAPACITY = 0;
 static size_t NumDevice = 0;
 
 static std::queue<void *> outputs_ptr_pool;
 static std::mutex outputs_pool_mutex;
 static std::condition_variable outputs_pool_cv;
+
+// Pre-allocated input buffer pool — each RunAsync reuses a pooled buffer so
+// the same physical addresses are registered with the DX-RT DMA engine across
+// repeated inferences.  Submitting a freshly malloc-ed pointer on every call
+// causes DX-RT to exhaust its internal DMA registration table (observed as
+// errno=-70 WRITE_INPUT failures starting at reqId=10 for SqueezeNet).
+static std::queue<void *> input_buf_pool;
+static std::mutex input_buf_pool_mutex;
+static std::condition_variable input_buf_pool_cv;
+static size_t INPUT_BUF_SIZE = 0;
 
 static std::queue<JobData> job_data_queue;
 static std::mutex job_data_queue_mutex;
@@ -212,6 +237,11 @@ static void wait_loop() {
             spdlog::error("[wait_loop] Wait failed job_id={} request_id={}: {}", job_data.job_id,
                           job_data.request_id, e.what());
             if (job_data.input_tensors) deep_free_tensors(job_data.input_tensors);
+            if (job_data.input_buf) {
+                std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+                input_buf_pool.push(job_data.input_buf);
+                input_buf_pool_cv.notify_one();
+            }
             if (job_data.outputs_ptr) {
                 std::lock_guard<std::mutex> lock(outputs_pool_mutex);
                 outputs_ptr_pool.push(job_data.outputs_ptr);
@@ -222,6 +252,11 @@ static void wait_loop() {
             spdlog::error("[wait_loop] Wait failed job_id={} request_id={}: unknown exception", job_data.job_id,
                           job_data.request_id);
             if (job_data.input_tensors) deep_free_tensors(job_data.input_tensors);
+            if (job_data.input_buf) {
+                std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+                input_buf_pool.push(job_data.input_buf);
+                input_buf_pool_cv.notify_one();
+            }
             if (job_data.outputs_ptr) {
                 std::lock_guard<std::mutex> lock(outputs_pool_mutex);
                 outputs_ptr_pool.push(job_data.outputs_ptr);
@@ -233,6 +268,13 @@ static void wait_loop() {
         if (job_data.input_tensors) {
             deep_free_tensors(job_data.input_tensors);
             job_data.input_tensors = nullptr;
+        }
+
+        // Return input buffer to pool so the same physical address is reused
+        if (job_data.input_buf) {
+            std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+            input_buf_pool.push(job_data.input_buf);
+            input_buf_pool_cv.notify_one();
         }
 
         {
@@ -341,6 +383,29 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
         }
         outputs_pool_cv.notify_one();
 
+        // Initialize the input buffer pool with the same capacity as the output
+        // pool.  Reusing these fixed allocations across RunAsync calls keeps the
+        // same physical addresses registered with the DX-RT DMA engine,
+        // preventing the errno=-70 WRITE_INPUT failures that occur when fresh
+        // malloc pointers are submitted on every call.
+        INPUT_BUF_SIZE = inference_engine->GetInputSize();
+        {
+            std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+            while (!input_buf_pool.empty()) input_buf_pool.pop();
+            for (size_t i = 0; i < OUTPUTS_POOL_CAPACITY; ++i) {
+                void *buf = malloc(INPUT_BUF_SIZE);
+                if (!buf) {
+                    spdlog::error("Failed to allocate input buffer {}", i);
+                    continue;
+                }
+                memset(buf, 0, INPUT_BUF_SIZE);
+                input_buf_pool.push(buf);
+            }
+            spdlog::info("Initialized input_buf_pool with {} buffers (each {} bytes)", input_buf_pool.size(),
+                         INPUT_BUF_SIZE);
+        }
+        input_buf_pool_cv.notify_one();
+
         stop_wait_thread.store(false);
         try {
             wait_thread = std::thread(wait_loop);
@@ -352,6 +417,13 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
                 while (!outputs_ptr_pool.empty()) {
                     free(outputs_ptr_pool.front());
                     outputs_ptr_pool.pop();
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+                while (!input_buf_pool.empty()) {
+                    free(input_buf_pool.front());
+                    input_buf_pool.pop();
                 }
             }
             delete inference_engine;
@@ -408,15 +480,52 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         spdlog::trace("[enqueue] acquired output buffer (pool_size_remaining={})", outputs_ptr_pool.size());
     }
 
+    // Acquire a pooled input buffer and copy the caller's data into it.
+    // Using a reused allocation keeps the same physical addresses registered
+    // with the DX-RT DMA engine, avoiding errno=-70 failures that occur when
+    // a fresh malloc pointer is submitted on every RunAsync call.
+    void *input_buf = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(input_buf_pool_mutex);
+        input_buf_pool_cv.wait(lock, []() { return !input_buf_pool.empty() || stop_wait_thread.load(); });
+        if (stop_wait_thread.load() && input_buf_pool.empty()) {
+            std::lock_guard<std::mutex> out_lock(outputs_pool_mutex);
+            outputs_ptr_pool.push(outputs_ptr);
+            outputs_pool_cv.notify_one();
+            g_last_error = "Runtime is shutting down";
+            return RUNTIME_STATUS_ERROR;
+        }
+        input_buf = input_buf_pool.front();
+        input_buf_pool.pop();
+    }
+
+    size_t copy_size = input_tensors->tensors[0].data_size;
+    if (copy_size > INPUT_BUF_SIZE) {
+        spdlog::warn("[enqueue] input data_size ({}) > pool buffer size ({}); clamping", copy_size, INPUT_BUF_SIZE);
+        copy_size = INPUT_BUF_SIZE;
+    }
+    if (input_tensors->tensors[0].data && copy_size > 0)
+        memcpy(input_buf, input_tensors->tensors[0].data, copy_size);
+
+    // input_tensors data has been copied into the pooled buffer — free it now
+    // to reduce memory pressure during pipelined inference.
+    int request_id = input_tensors->id;
+    deep_free_tensors(input_tensors);
+    input_tensors = nullptr;
+
     int job_id = -1;
     try {
-        spdlog::trace("[enqueue] calling RunAsync for request_id={}", input_tensors->id);
-        job_id =
-            inference_engine->RunAsync(static_cast<uint8_t *>(input_tensors->tensors[0].data), nullptr, outputs_ptr);
-        spdlog::trace("[enqueue] RunAsync returned job_id={} for request_id={}", job_id, input_tensors->id);
+        spdlog::trace("[enqueue] calling RunAsync for request_id={}", request_id);
+        job_id = inference_engine->RunAsync(static_cast<uint8_t *>(input_buf), nullptr, outputs_ptr);
+        spdlog::trace("[enqueue] RunAsync returned job_id={} for request_id={}", job_id, request_id);
     } catch (const std::exception &e) {
-        spdlog::error("[enqueue] RunAsync failed for request_id={}: {}", input_tensors->id, e.what());
+        spdlog::error("[enqueue] RunAsync failed for request_id={}: {}", request_id, e.what());
         g_last_error = std::string("Inference failed: ") + e.what();
+        {
+            std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+            input_buf_pool.push(input_buf);
+            input_buf_pool_cv.notify_one();
+        }
         {
             std::lock_guard<std::mutex> lock(outputs_pool_mutex);
             outputs_ptr_pool.push(outputs_ptr);
@@ -428,8 +537,9 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     JobData job_data{};
     job_data.job_id = job_id;
     job_data.model_id = model_id;
-    job_data.request_id = input_tensors->id;
-    job_data.input_tensors = input_tensors;
+    job_data.request_id = request_id;
+    job_data.input_tensors = nullptr;
+    job_data.input_buf = input_buf;
     job_data.outputs_ptr = outputs_ptr;
 
     {
@@ -543,6 +653,7 @@ RuntimeStatus runtime_cleanup(void) {
     job_data_queue_cv.notify_all();
     output_queue_cv.notify_all();
     outputs_pool_cv.notify_all();
+    input_buf_pool_cv.notify_all();
 
     // Drain output queue
     {
@@ -551,6 +662,10 @@ RuntimeStatus runtime_cleanup(void) {
             JobData r = std::move(output_queue.front());
             output_queue.pop();
             if (r.input_tensors) deep_free_tensors(r.input_tensors);
+            if (r.input_buf) {
+                std::lock_guard<std::mutex> ibp_lock(input_buf_pool_mutex);
+                input_buf_pool.push(r.input_buf);
+            }
             if (r.outputs_ptr) free(r.outputs_ptr);
         }
     }
@@ -562,6 +677,10 @@ RuntimeStatus runtime_cleanup(void) {
             JobData j = job_data_queue.front();
             job_data_queue.pop();
             if (j.input_tensors) deep_free_tensors(j.input_tensors);
+            if (j.input_buf) {
+                std::lock_guard<std::mutex> ibp_lock(input_buf_pool_mutex);
+                input_buf_pool.push(j.input_buf);
+            }
             if (j.outputs_ptr) free(j.outputs_ptr);
         }
     }
@@ -573,6 +692,16 @@ RuntimeStatus runtime_cleanup(void) {
             free(outputs_ptr_pool.front());
             outputs_ptr_pool.pop();
         }
+    }
+
+    // Free input buffer pool
+    {
+        std::lock_guard<std::mutex> lock(input_buf_pool_mutex);
+        while (!input_buf_pool.empty()) {
+            free(input_buf_pool.front());
+            input_buf_pool.pop();
+        }
+        INPUT_BUF_SIZE = 0;
     }
 
     // Join wait thread
@@ -593,6 +722,7 @@ RuntimeStatus runtime_cleanup(void) {
     OutputTensorSizes.clear();
     OUTPUTS_POOL_CAPACITY = 0;
     NumDevice = 0;
+    INPUT_BUF_SIZE = 0;
 
     spdlog::info("Runtime cleanup completed");
     if (logger) {
