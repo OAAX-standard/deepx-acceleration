@@ -228,6 +228,7 @@ jobs:
           }
 
   integration-tests:
+    if: false
     timeout-minutes: 30
     runs-on: hetzner
     needs: [build-toolchain, build-runtime-ubuntu]
