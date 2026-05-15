@@ -45,6 +45,63 @@ TEST_MODELS = {
         "input_shape": [1, 224, 224, 3],
         "input_dtype": "uint8",
     },
+    # --- Object Detection ---
+    "yolo26n": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/yolo26n-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/yolo26n-1.json",
+        "filename": "yolo26n.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo26s": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/yolo26s-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/yolo26s-1.json",
+        "filename": "yolo26s.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo26m": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/yolo26m-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/yolo26m-1.json",
+        "filename": "yolo26m.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo11n": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/YOLOV11N-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/YOLOV11N-1.json",
+        "filename": "yolo11n.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo11s": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/YOLOV11S-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/YOLOV11S-1.json",
+        "filename": "yolo11s.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo8n": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/YOLOV8N-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/YOLOV8N-1.json",
+        "filename": "yolo8n.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
+    "yolo8s": {
+        "url": "https://sdk.deepx.ai/modelzoo/onnx/YOLOV8S-1.onnx",
+        "json_url": "https://sdk.deepx.ai/modelzoo/json/YOLOV8S-1.json",
+        "filename": "yolo8s.onnx",
+        "input_name": "images",
+        "input_shape": [1, 640, 640, 3],
+        "input_dtype": "uint8",
+    },
 }
 
 _ELEMENT_SIZES = {"float32": 4, "float16": 2, "uint8": 1, "int8": 1}
@@ -121,6 +178,46 @@ def download_calibration_dataset(dest_dir: str) -> str:
             extracted[0].rename(calib_dir)
 
     return str(calib_dir)
+
+
+def preprocess_image(image_path: str, model_name: str, cache_dir: str) -> str:
+    """
+    Load, letterbox-resize, and cache a uint8 HWC raw image for inference_runner.
+
+    The output file is named after the input shape so it is shared by all models
+    with the same input dimensions.  Returns the path to the cached raw file.
+    """
+    meta = TEST_MODELS[model_name]
+    _, h, w, c = meta["input_shape"]  # NHWC
+
+    cache_path = Path(cache_dir) / f"image_{h}x{w}x{c}.raw"
+    if cache_path.exists():
+        return str(cache_path)
+
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"Cannot load image: {image_path}")
+
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Letterbox: scale to fit within (h, w) while preserving aspect ratio, pad with 114
+    img_h, img_w = img.shape[:2]
+    scale = min(w / img_w, h / img_h)
+    new_w, new_h = int(img_w * scale), int(img_h * scale)
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    canvas = np.full((h, w, c), 114, dtype=np.uint8)
+    pad_top = (h - new_h) // 2
+    pad_left = (w - new_w) // 2
+    canvas[pad_top : pad_top + new_h, pad_left : pad_left + new_w] = resized
+
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    canvas.tofile(str(cache_path))
+    print(f"Cached preprocessed image → {cache_path}")
+    return str(cache_path)
 
 
 def _download_url(url: str, dest: Path) -> None:

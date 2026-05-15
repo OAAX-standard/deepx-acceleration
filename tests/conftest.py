@@ -121,29 +121,40 @@ def _convert_with_docker(
     return dxnn_path
 
 
+class _LazyCompiledModels:
+    """Converts models on first access so pytest reports results per model."""
+
+    def __init__(self, onnx_dir: Path, calib_dir: Path):
+        self._onnx_dir = onnx_dir
+        self._calib_dir = calib_dir
+        self._cache: dict = {}
+
+    def __getitem__(self, name: str) -> Path:
+        if name in self._cache:
+            return self._cache[name]
+        dxnn = COMPILED_DIR / name / f"{name}.dxnn"
+        if not dxnn.exists():
+            onnx = Path(download_model(name, str(self._onnx_dir)))
+            json_path = Path(download_model_json(name, str(self._onnx_dir)))
+            dxnn = _convert_with_docker(name, onnx, json_path, self._calib_dir, COMPILED_DIR / name)
+        self._cache[name] = dxnn
+        return dxnn
+
+
 @pytest.fixture(scope="session")
-def compiled_models() -> dict:
+def compiled_models() -> _LazyCompiledModels:
     """
-    Download and convert classification models (MobileNetV1, MobileNetV2, SqueezeNet1_1).
-    Returns {model_name: Path-to-dxnn}.
+    Returns a lazy dict-like object that downloads and converts each model on first access.
+    Conversion is triggered per model as tests run, so results are reported incrementally.
     """
     if not _docker_image_available():
         pytest.skip(
-            f"Docker image '{DOCKER_IMAGE}' not available. " f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
+            f"Docker image '{DOCKER_IMAGE}' not available. "
+            f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
         )
 
     onnx_dir = COMPILED_DIR / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
     calib_dir = Path(download_calibration_dataset(str(COMPILED_DIR)))
 
-    result = {}
-    for name in TEST_MODELS:
-        dxnn = COMPILED_DIR / name / f"{name}.dxnn"
-        if dxnn.exists():
-            result[name] = dxnn
-            continue
-        onnx = Path(download_model(name, str(onnx_dir)))
-        json_path = Path(download_model_json(name, str(onnx_dir)))
-        result[name] = _convert_with_docker(name, onnx, json_path, calib_dir, COMPILED_DIR / name)
-
-    return result
+    return _LazyCompiledModels(onnx_dir, calib_dir)

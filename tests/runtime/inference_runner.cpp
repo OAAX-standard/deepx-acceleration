@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "runtime_core.h"
+#include "yolo_postprocess.hpp"
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
@@ -25,6 +26,7 @@ static void print_usage(const char *prog) {
             "\n"
             "Optional:\n"
             "  --input-shape N,H,W,C  Input tensor shape (default: unset)\n"
+            "  --image <path>         Raw uint8 HWC image file to use as input (default: zeros)\n"
             "  --runs <N>             Number of timed inference runs (default: 100)\n"
             "  --warmup <N>           Number of warmup runs, sequential (default: 10)\n"
             "  --pipeline-depth <N>   Requests kept in-flight simultaneously (default: 4)\n"
@@ -65,7 +67,8 @@ private:
 
 static int g_request_id = 0;
 
-static Tensors *make_input(size_t data_size, const std::vector<int> &shape) {
+static Tensors *make_input(size_t data_size, const std::vector<int> &shape,
+                           const uint8_t *image_buf = nullptr) {
     Tensors *t = (Tensors *)malloc(sizeof(Tensors));
     if (!t) return nullptr;
 
@@ -87,7 +90,7 @@ static Tensors *make_input(size_t data_size, const std::vector<int> &shape) {
             memcpy(t->tensors[0].shape, shape.data(), shape.size() * sizeof(int));
     }
     t->tensors[0].data_size = data_size;
-    t->tensors[0].data = calloc(1, data_size);
+    t->tensors[0].data = malloc(data_size);
     if (!t->tensors[0].data || !t->tensors[0].name) {
         free(t->tensors[0].name);
         free(t->tensors[0].shape);
@@ -96,6 +99,10 @@ static Tensors *make_input(size_t data_size, const std::vector<int> &shape) {
         free(t);
         return nullptr;
     }
+    if (image_buf)
+        memcpy(t->tensors[0].data, image_buf, data_size);
+    else
+        memset(t->tensors[0].data, 0, data_size);
     return t;
 }
 
@@ -150,11 +157,11 @@ struct SharedState {
 // ---------------------------------------------------------------------------
 
 static void producer_thread(int num_runs, size_t input_size, const std::vector<int> &shape,
-                             Semaphore &sem, SharedState &state) {
+                             Semaphore &sem, SharedState &state, const uint8_t *image_buf) {
     for (int i = 0; i < num_runs && !state.error.load(); i++) {
         sem.acquire();
 
-        Tensors *inp = make_input(input_size, shape);
+        Tensors *inp = make_input(input_size, shape, image_buf);
         if (!inp) {
             fprintf(stderr, "[producer] OOM at run %d/%d\n", i + 1, num_runs);
             state.error.store(true);
@@ -223,6 +230,7 @@ static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state,
 
 int main(int argc, char **argv) {
     const char *model_path = nullptr;
+    const char *image_path = nullptr;
     size_t input_size = 0;
     std::vector<int> input_shape;
     int num_runs = 100;
@@ -233,6 +241,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_path = argv[++i];
+        } else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
+            image_path = argv[++i];
         } else if (strcmp(argv[i], "--input-size") == 0 && i + 1 < argc) {
             input_size = (size_t)atoll(argv[++i]);
         } else if (strcmp(argv[i], "--input-shape") == 0 && i + 1 < argc) {
@@ -268,6 +278,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[config] input_shape=%s\n", shape_str.c_str());
     }
 
+    // Derive model name early so we can detect the YOLO family before warmup
+    std::string path_str_early(model_path);
+    size_t slash_early = path_str_early.rfind('/');
+    std::string model_name_early = (slash_early == std::string::npos)
+                                       ? path_str_early
+                                       : path_str_early.substr(slash_early + 1);
+    size_t dot_early = model_name_early.rfind('.');
+    if (dot_early != std::string::npos) model_name_early = model_name_early.substr(0, dot_early);
+
+    yolo::Family yolo_family = yolo::detect_family(model_name_early);
+    if (yolo_family != yolo::Family::UNKNOWN)
+        fprintf(stderr, "[postprocess] detected YOLO family for model '%s'\n", model_name_early.c_str());
+
     Config cfg = {0, nullptr, nullptr};
     RuntimeStatus s = runtime_init(cfg);
     if (s != RUNTIME_STATUS_SUCCESS) {
@@ -287,7 +310,7 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "[init] model loaded: %s\n", model_path);
 
-    // Print input tensor metadata once
+    // Print input tensor metadata once (zeros are fine here — only for shape logging)
     {
         Tensors *inp = make_input(input_size, input_shape);
         if (inp) {
@@ -306,10 +329,41 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Load test image into a shared buffer (reused across all runs)
+    std::vector<uint8_t> image_data;
+    if (image_path) {
+        FILE *f = fopen(image_path, "rb");
+        if (!f) {
+            fprintf(stderr, "Error: cannot open image file: %s\n", image_path);
+            runtime_cleanup();
+            return 1;
+        }
+        fseek(f, 0, SEEK_END);
+        size_t file_size = (size_t)ftell(f);
+        rewind(f);
+        if (file_size != input_size) {
+            fprintf(stderr, "Error: image file size %zu != input_size %zu\n", file_size, input_size);
+            fclose(f);
+            runtime_cleanup();
+            return 1;
+        }
+        image_data.resize(file_size);
+        if (fread(image_data.data(), 1, file_size, f) != file_size) {
+            fprintf(stderr, "Error: failed to read image file: %s\n", image_path);
+            fclose(f);
+            runtime_cleanup();
+            return 1;
+        }
+        fclose(f);
+        fprintf(stderr, "[image] loaded %zu bytes from %s\n", file_size, image_path);
+    }
+
     // Warmup: sequential so hardware is in a stable state before pipelined timing
+    const uint8_t *img_buf = image_data.empty() ? nullptr : image_data.data();
+
     fprintf(stderr, "[warmup] starting %d warmup run(s)\n", warmup);
     for (int i = 0; i < warmup; i++) {
-        Tensors *inp = make_input(input_size, input_shape);
+        Tensors *inp = make_input(input_size, input_shape, img_buf);
         if (!inp) {
             fprintf(stderr, "[warmup] OOM at run %d/%d\n", i + 1, warmup);
             runtime_cleanup();
@@ -331,7 +385,7 @@ int main(int argc, char **argv) {
         }
         if (out_model != 0)
             fprintf(stderr, "[warmup] unexpected out_model=%d at run %d/%d\n", out_model, i + 1, warmup);
-        // Log output tensor metadata on the first warmup output
+        // Log output tensor metadata and run post-processing on first warmup output
         if (i == 0 && out) {
             fprintf(stderr, "[output tensor] num_tensors=%d\n", out->num_tensors);
             for (int j = 0; j < out->num_tensors; j++) {
@@ -342,6 +396,11 @@ int main(int argc, char **argv) {
                 shape_str += "]";
                 fprintf(stderr, "[output tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n",
                         j, td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
+            }
+
+            if (yolo_family != yolo::Family::UNKNOWN) {
+                auto dets = yolo::postprocess(out, yolo_family);
+                yolo::log_detections(dets, model_name_early.c_str());
             }
         }
         free_tensors(out);
@@ -359,7 +418,7 @@ int main(int argc, char **argv) {
     auto wall_start = std::chrono::high_resolution_clock::now();
 
     std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape),
-                         std::ref(sem), std::ref(state));
+                         std::ref(sem), std::ref(state), img_buf);
     std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state),
                          std::ref(latencies_ms));
 

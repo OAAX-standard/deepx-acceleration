@@ -144,6 +144,37 @@ echo "  stage2.py, models.py"
 # Patch stage2.py: fix import path and COMPILED_DIR to work standalone
 sed -i 's/from tests\.models/from models/' "$PKG_DIR/stage2.py"
 
+# Test image + pre-processed raw inputs (so the remote machine doesn't need cv2)
+IMAGE_SRC="$SCRIPT_DIR/image.jpg"
+if [[ -f "$IMAGE_SRC" ]]; then
+    cp "$IMAGE_SRC" "$PKG_DIR/image.jpg"
+    echo "  image.jpg"
+
+    mkdir -p "$PKG_DIR/test_inputs"
+    echo "  Pre-processing test image for all unique input shapes..."
+    cd "$SCRIPT_DIR"
+    uv run python3 - << 'PYEOF'
+import sys
+sys.path.insert(0, ".")
+from models import TEST_MODELS, preprocess_image
+
+seen = set()
+for name in TEST_MODELS:
+    shape = tuple(TEST_MODELS[name]["input_shape"])
+    if shape in seen:
+        continue
+    seen.add(shape)
+    try:
+        out = preprocess_image("image.jpg", name, "test_inputs")
+        print(f"    {out}")
+    except Exception as e:
+        print(f"    Warning: could not preprocess for shape {shape}: {e}", file=sys.stderr)
+PYEOF
+    cd "$REPO_ROOT"
+    cp "$SCRIPT_DIR"/test_inputs/*.raw "$PKG_DIR/test_inputs/" 2>/dev/null || true
+    echo "  test_inputs/ : $(ls "$PKG_DIR/test_inputs/" 2>/dev/null | wc -l) raw file(s)"
+fi
+
 # Launcher script (auto-detects arch at runtime)
 cat > "$PKG_DIR/run_stage2.sh" << 'EOF'
 #!/bin/bash
@@ -178,6 +209,7 @@ ARGS=(
 )
 [[ -n "$MODELS" ]] && ARGS+=(--models $MODELS)
 [[ -n "$CSV"    ]] && ARGS+=(--csv "$CSV")
+[[ -f "$SCRIPT_DIR/image.jpg" ]] && ARGS+=(--image "$SCRIPT_DIR/image.jpg")
 
 python3 "$SCRIPT_DIR/stage2.py" "${ARGS[@]}"
 EOF
@@ -199,8 +231,10 @@ Usage:
   ./run_stage2.sh
 
 With options:
-  MODELS="yolov8n" RUNS=200 CSV=results.csv ./run_stage2.sh
+  MODELS="yolo8n" RUNS=200 CSV=results.csv ./run_stage2.sh
 
+A test image (image.jpg) is bundled and used automatically as model input.
+YOLO models will log detected bounding boxes from the first warmup run.
 Results are printed to stdout and optionally written to a CSV file.
 EOF
 

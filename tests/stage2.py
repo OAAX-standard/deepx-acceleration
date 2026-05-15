@@ -34,13 +34,15 @@ def _parse_args():
     )
     parser.add_argument("--runs", type=int, default=100, help="Number of timed inference runs per model (default: 100)")
     parser.add_argument("--warmup", type=int, default=10, help="Number of warmup runs (default: 10)")
+    parser.add_argument("--pipeline-depth", type=int, default=4, help="In-flight inference requests (default: 4)")
     parser.add_argument("--csv", metavar="FILE", help="Write results to a CSV file")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--image", metavar="FILE", help="Image to use as inference input (letterbox-resized to model input shape)")
     return parser.parse_args()
 
 
-def _discover_models(filter_names=None) -> list[dict]:
-    """Return list of {name, dxnn_path, input_size} for available compiled models."""
+def _discover_models(filter_names=None, pipeline_depth=4) -> list[dict]:
+    """Return list of {name, dxnn_path, input_size, pipeline_depth} for available compiled models."""
     # Import here so the module works even without models.py dependencies
     try:
         from tests.models import TEST_MODELS, input_data_size
@@ -61,6 +63,7 @@ def _discover_models(filter_names=None) -> list[dict]:
                 "dxnn_path": dxnn,
                 "input_size": input_data_size(name),
                 "input_shape": TEST_MODELS[name]["input_shape"],
+                "pipeline_depth": pipeline_depth,
             }
         )
     return models
@@ -106,11 +109,17 @@ def _run_model(model: dict, runs: int, warmup: int) -> dict | None:
         str(runs),
         "--warmup",
         str(warmup),
+        "--pipeline-depth",
+        str(model["pipeline_depth"]),
         "--csv",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    if model.get("image_path"):
+        cmd += ["--image", model["image_path"]]
+    # stdout is captured for CSV parsing; stderr flows to the terminal so
+    # post-processing logs and runtime diagnostics are visible.
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
     if result.returncode != 0:
-        print(f"Error running {model['name']}: {result.stderr.strip()}", file=sys.stderr)
+        print(f"Error running {model['name']}: returncode={result.returncode}", file=sys.stderr)
         return None
 
     line = result.stdout.strip()
@@ -151,12 +160,25 @@ def _print_table(results: list[dict]) -> None:
 def main() -> int:
     args = _parse_args()
 
-    models = _discover_models(args.models)
+    models = _discover_models(args.models, args.pipeline_depth)
     if not models:
         print("No compiled DXNN models found under tests/compiled_models/ — skipping inference tests.")
         return 0
 
     print(f"Found {len(models)} model(s): {[m['name'] for m in models]}")
+
+    # Preprocess the test image for each model if --image was provided
+    if args.image:
+        try:
+            from tests.models import preprocess_image
+        except ImportError:
+            from models import preprocess_image  # type: ignore
+        image_cache_dir = str(TESTS_DIR / "test_inputs")
+        for model in models:
+            try:
+                model["image_path"] = preprocess_image(args.image, model["name"], image_cache_dir)
+            except Exception as e:
+                print(f"Warning: could not preprocess image for {model['name']}: {e}", file=sys.stderr)
 
     if not _build_runner():
         print("Error: failed to build inference_runner.", file=sys.stderr)

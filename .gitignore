@@ -53,3 +53,4 @@ tests/compiled_models/
 
 # uv
 .venv/
+tests/test_inputs/

@@ -6,22 +6,22 @@ import pytest
 
 from tests.models import TEST_MODELS
 
-CLASSIFICATION_MODELS = list(TEST_MODELS.keys())
+ALL_MODELS = list(TEST_MODELS.keys())
 
 MIN_DXNN_SIZE_BYTES = 1024
 
 
-class TestClassificationConversion:
-    @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
+class TestModelConversion:
+    @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_dxnn_exists(self, compiled_models, model_name):
         assert compiled_models[model_name].exists()
 
-    @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
+    @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_dxnn_nonempty(self, compiled_models, model_name):
         path = compiled_models[model_name]
         assert path.stat().st_size > 0, f"{path.name} is empty"
 
-    @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
+    @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_dxnn_min_size(self, compiled_models, model_name):
         path = compiled_models[model_name]
         size = path.stat().st_size
@@ -29,12 +29,12 @@ class TestClassificationConversion:
             f"{path.name} is suspiciously small: {size} bytes (expected >= {MIN_DXNN_SIZE_BYTES})"
         )
 
-    @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
+    @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_convert_log_exists(self, compiled_models, model_name):
         log = compiled_models[model_name].parent / "convert.log"
         assert log.exists(), "convert.log not found"
 
-    @pytest.mark.parametrize("model_name", CLASSIFICATION_MODELS)
+    @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_convert_log_success(self, compiled_models, model_name):
         log = compiled_models[model_name].parent / "convert.log"
         if not log.exists():
