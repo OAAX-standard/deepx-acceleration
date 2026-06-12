@@ -10,6 +10,8 @@ calibration_dataset/
 
 # Build artifacts
 build/
+build-*/
+build-local/
 artifacts/
 
 # IDE files
@@ -38,4 +40,18 @@ example_*_ubuntu*
 # Archive files
 *.zip
 *.tar.gz
-*.tar.bz2 
+*.tar.bz2
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+
+# Test artifacts
+tests/compiled_models/
+
+
+# uv
+.venv/
+tests/test_inputs/
+tests/detections/

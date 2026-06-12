@@ -1,0 +1,5 @@
+# Rules that require extensive Dockerfile restructuring to address — ignored for now.
+ignore:
+  - DL3008  # pin apt versions — not practical for internal build images
+  - DL3003  # use WORKDIR instead of cd — would require significant restructuring
+  - DL3009  # delete apt lists — handled at image cleanup stage

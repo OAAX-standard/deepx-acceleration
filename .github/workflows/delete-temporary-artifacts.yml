@@ -1,5 +1,8 @@
 name: Delete test runtimes and toolchain on PR close
 
+permissions:
+  contents: none
+
 on:
   pull_request:
     types:
@@ -10,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install s3cmd and Python dependencies
+      - name: Install s3cmd
         run: |
           sudo apt-get update
           sudo apt-get install -y s3cmd
@@ -31,10 +34,8 @@ jobs:
         run: |
           version=${{ github.head_ref }}
           echo "version=${version}" >> $GITHUB_ENV
-          echo "Environment variable: ${{ env.version }}"
-
 
       - name: Delete runtimes and toolchain folders from S3
         run: |
-            s3cmd del --recursive "s3://oaax/runtimes/${{ env.version }}/DEEPX/" || echo "Warning: No runtime-library found for version ${{ env.version }}"
-            s3cmd del --recursive "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${{ env.version }}"
+          s3cmd del --recursive "s3://oaax/runtimes/${{ env.version }}/DEEPX/" || echo "Warning: No runtime-library found for version ${{ env.version }}"
+          s3cmd del --recursive "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${{ env.version }}"

@@ -1,110 +1,130 @@
 #ifndef RUNTIME_CORE_H
 #define RUNTIME_CORE_H
 
-#if defined(_WIN32) || defined(_WIN64)
-#  ifdef RUNTIME_LIBRARY_EXPORTS
-#    define RUNTIME_API __declspec(dllexport)
-#  else
-#    define RUNTIME_API __declspec(dllimport)
-#  endif
-#else
-#  define RUNTIME_API
-#endif
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <stddef.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#ifdef RUNTIME_LIBRARY_EXPORTS
+#define RUNTIME_API __declspec(dllexport)
+#else
+#define RUNTIME_API __declspec(dllimport)
+#endif
+#else
+#define RUNTIME_API
+#endif
+
+#ifdef __cplusplus
 extern "C" {
-#include "tensors_struct.h"
-}
+#endif
 
-/**
- * @brief This function is called only once to initialize the ru    ntime environment.
- *
- * @return 0 if the initialization is successful, and non-zero otherwise.
- */
-RUNTIME_API int runtime_initialization();
+// ---------------------------------------------------------------------------
+// OAAX 2.0 Type Definitions
+// ---------------------------------------------------------------------------
 
-/**
- * @brief This function is called to initialize the runtime environment with arguments.
- * 
- * @note If this function is used to initialize the runtime, the runtime_initialization() function should not be called.
- * 
- * @note If an unknown key is passed, the runtime should ignore it.
- *
- * @param length The number of arguments.
- * @param keys The keys of the arguments.
- * @param values The values of the arguments.
- * @return 0 if the initialization is successful, and non-zero otherwise.
- */
-RUNTIME_API int runtime_initialization_with_args(int length, const char **keys, const void **values);
+typedef enum RuntimeStatus {
+    RUNTIME_STATUS_SUCCESS = 0,
+    RUNTIME_STATUS_ERROR = 1,
+    RUNTIME_STATUS_NOT_INITIALIZED = 2,
+    RUNTIME_STATUS_ALREADY_INITIALIZED = 3,
+    RUNTIME_STATUS_MODEL_NOT_LOADED = 4,
+    RUNTIME_STATUS_INVALID_ARGUMENT = 5,
+    RUNTIME_STATUS_INVALID_MODEL = 6,
+    RUNTIME_STATUS_FILE_NOT_FOUND = 7,
+    RUNTIME_STATUS_OUT_OF_MEMORY = 8,
+    RUNTIME_STATUS_INVALID_TENSOR = 9,
+    RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH = 10,
+    RUNTIME_STATUS_TENSOR_TYPE_MISMATCH = 11,
+    RUNTIME_STATUS_NO_OUTPUT_AVAILABLE = 12,
+    RUNTIME_STATUS_INFERENCE_ERROR = 13,
+    RUNTIME_STATUS_NOT_IMPLEMENTED = 14,
+    RUNTIME_STATUS_TIMEOUT = 15,
+    RUNTIME_STATUS_DEVICE_ERROR = 16,
+    RUNTIME_STATUS_UNKNOWN_ERROR = 17,
+    RUNTIME_STATUS_INVALID_MODEL_ID = 18
+} RuntimeStatus;
 
-/**
- * @brief This function is called to load the model from the file path.
- *
- * @param file_path The path to the model file.
- * @return 0 if the model is loaded successfully, and non-zero otherwise.
- */
-RUNTIME_API int runtime_model_loading(const char *file_path);
+typedef enum TensorElementType {
+    DATA_TYPE_UNDEFINED = 0,
+    DATA_TYPE_FLOAT = 1,
+    DATA_TYPE_UINT8 = 2,
+    DATA_TYPE_INT8 = 3,
+    DATA_TYPE_UINT16 = 4,
+    DATA_TYPE_INT16 = 5,
+    DATA_TYPE_INT32 = 6,
+    DATA_TYPE_INT64 = 7,
+    DATA_TYPE_STRING = 8,
+    DATA_TYPE_BOOL = 9,
+    DATA_TYPE_FLOAT16 = 10,
+    DATA_TYPE_DOUBLE = 11,
+    DATA_TYPE_UINT32 = 12,
+    DATA_TYPE_UINT64 = 13,
+    DATA_TYPE_COMPLEX64 = 14,
+    DATA_TYPE_COMPLEX128 = 15,
+    DATA_TYPE_BFLOAT16 = 16,
+    DATA_TYPE_FLOAT8E4M3FN = 17,
+    DATA_TYPE_FLOAT8E4M3FNUZ = 18,
+    DATA_TYPE_FLOAT8E5M2 = 19,
+    DATA_TYPE_FLOAT8E5M2FNUZ = 20,
+    DATA_TYPE_UINT4 = 21,
+    DATA_TYPE_INT4 = 22,
+    DATA_TYPE_FLOAT4E2M1 = 23,
+    DATA_TYPE_FLOAT8E8M0 = 24,
+    DATA_TYPE_UINT2 = 25,
+    DATA_TYPE_INT2 = 26
+} TensorElementType;
 
-/**
- * @brief This function is called to store the input tensors to be processed by the runtime when it's ready.
- * 
- * @note This function copies the reference of the input tensors, not the tensors themselves. 
- * The runtime will free the memory of the input tensors after its processed.
- * 
- * @warning If this function returns a non-zero value, the caller is expected to free the memory of the input tensors.
- *
- * @param tensors The input tensors for the inference processing. 
- * 
- * @return 0 if the input tensors are stored successfully, and non-zero otherwise.
- */
-RUNTIME_API int send_input(tensors_struct *input_tensors);
+typedef struct TensorDescriptor {
+    char *name;
+    TensorElementType data_type;
+    int rank;
+    int *shape;
+    size_t data_size;
+    void *data;
+} TensorDescriptor;
 
-/**
- * @brief This function is called to retrieve any available output tensors after the inference process is done.
- *
- * @note The caller is responsible for managing the memory of the output tensors.
- * 
- * @param output_tensors The output tensors of the inference process.
- * 
- * @return 0 if an output is available and returned, and non-zero otherwise.
- */
-RUNTIME_API int receive_output(tensors_struct **output_tensors);
+typedef struct Tensors {
+    int id;
+    int num_tensors;
+    TensorDescriptor *tensors;
+} Tensors;
 
-/**
- * @brief This function is called to destroy the runtime environment after the inference process is stopped.
+typedef struct Config {
+    int length;
+    const char **keys;
+    const char **values;
+} Config;
 
- * @return 0 if the finalization is successful, and non-zero otherwise.
- */
-RUNTIME_API int runtime_destruction();
+typedef struct ModelConfig {
+    const char *file_path;
+    const unsigned char *model_data;
+    size_t model_size;
+    Config config;
+} ModelConfig;
 
-/**
- * @brief This function is called to get the error message in case of a runtime error.
+// ---------------------------------------------------------------------------
+// Runtime API
+// ---------------------------------------------------------------------------
 
- * @return The error message in a human-readable format. This should be allocated by the shared library, and proper deallocation should be handled by the library.
- */
-RUNTIME_API const char *runtime_error_message();
+RUNTIME_API RuntimeStatus runtime_init(Config config);
 
-/**
- * @brief This function is called to get the version of the shared library.
+RUNTIME_API RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs);
 
- * @return The version of the shared library. This should be allocated by the shared library, and proper deallocation should be handled by the library.
- */
-RUNTIME_API const char *runtime_version();
+RUNTIME_API RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors);
 
-/**
- * @brief This function is called to get the name of the shared library.
+RUNTIME_API RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, int timeout_ms);
 
- * @return The name of the shared library. This should be allocated by the shared library, and proper deallocation should be handled by the library.
- */
-RUNTIME_API const char *runtime_name();
+RUNTIME_API RuntimeStatus runtime_cleanup(void);
+
+RUNTIME_API const char *runtime_get_error(void);
+
+RUNTIME_API const char *runtime_get_version(void);
+
+RUNTIME_API const char *runtime_get_name(void);
+
+RUNTIME_API const char *runtime_get_info(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // RUNTIME_CORE_H  
+#endif  // RUNTIME_CORE_H
