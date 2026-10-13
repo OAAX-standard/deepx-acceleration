@@ -26,15 +26,20 @@ pytest tests/test_models.py -v
 
 ## Models
 
-The suite tests three image classification models from the DeepX Model Zoo:
+Ten models from the DeepX Model Zoo (`TEST_MODELS` in `models.py`):
 
-| Name | ONNX source | Input shape |
-|---|---|---|
-| MobileNetV1 | `sdk.deepx.ai/modelzoo/onnx/MobileNetV1-1.onnx` | `[1,224,224,3]` |
-| MobileNetV2 | `sdk.deepx.ai/modelzoo/onnx/MobileNetV2-1.onnx` | `[1,224,224,3]` |
-| SqueezeNet1_1 | `sdk.deepx.ai/modelzoo/onnx/SqueezeNet1_1-3.onnx` | `[1,224,224,3]` |
+| Group | Names |
+|---|---|
+| Classification | `mobilenetv1`, `mobilenetv2`, `squeezenet1_1` — input `[1,224,224,3]` |
+| Object detection | `yolo8n`, `yolo8s`, `yolo11n`, `yolo11s`, `yolo26n`, `yolo26s`, `yolo26m` — input `[1,640,640,3]` |
 
-All input shapes are NHWC; all compiled models take `uint8` input.
+All input shapes are NHWC; all compiled models take `uint8` input. For detection models,
+`inference_runner` decodes and NMS-filters the output (`runtime/yolo_postprocess.hpp`) and logs the
+detected boxes of the first warmup run, so a wrong output layout is visible without extra tooling.
+
+> **Licensing:** the YOLO models are Ultralytics-derived (AGPL-3.0). They are downloaded for testing only —
+> never commit them or ship compiled `.dxnn` files from them with the product. `tests/image.jpg` is a
+> sample input; make sure you have the right to redistribute it before publishing the repo.
 
 ---
 
@@ -46,7 +51,7 @@ All input shapes are NHWC; all compiled models take `uint8` input.
 |---|---|
 | Docker | Must be running and accessible to the current user |
 | DeepX toolchain image | Default: `oaax-deepx-toolchain:latest` — build with `conversion-toolchain/build-toolchain.sh` |
-| Python 3.8+ with `pytest` | `pip install pytest` or use `uv` |
+| Python 3.10+ with `pytest`, `numpy`, `opencv-python-headless` | `uv sync` installs them (numpy/opencv are used to preprocess `--image` inputs) |
 
 ### Stage 2 (inference)
 
@@ -55,7 +60,7 @@ All input shapes are NHWC; all compiled models take `uint8` input.
 | DeepX NPU hardware | DX-M1 or DX-H1 |
 | `libRuntimeLibrary.so` | Built from `runtime-library/` (see below) |
 | CMake 3.14+ and a C++11 compiler | To build `inference_runner` |
-| Python 3.8+ | |
+| Python 3.10+ | `uv sync` |
 
 ---
 
@@ -91,7 +96,7 @@ tests/compiled_models/
 │   ├── mobilenetv1.dxnn
 │   └── convert.log
 ├── mobilenetv2/  ...
-└── squeezenet1_1/  ...
+└── <one directory per model>/  ...
 ```
 
 Conversion is cached — re-running skips models whose `.dxnn` already exists.
@@ -138,15 +143,21 @@ bash tests/runtime/build-tests.sh \
 | `MODELS` | all | Space-separated model names to run |
 | `RUNS` | 100 | Timed inference runs per model |
 | `WARMUP` | 10 | Warmup runs (excluded from metrics) |
+| `PIPELINE_DEPTH` | 4 | In-flight inference requests (stage2.py `--pipeline-depth`) |
 | `CSV` | — | Path to append results in CSV format |
+| `LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `DEEPX_RUNTIME_LIB_DIR` | auto-detected | Directory containing `libRuntimeLibrary.so` |
 | `DEEPX_RUNNER_DIR` | auto-detected | Directory containing `inference_runner` |
 
 Example:
 
 ```bash
-MODELS="mobilenetv1 mobilenetv2" RUNS=200 CSV=results.csv ./tests/run_stage2.sh
+MODELS="mobilenetv1 mobilenetv2" RUNS=200 PIPELINE_DEPTH=8 CSV=results.csv ./tests/run_stage2.sh
 ```
+
+To feed a real image instead of zeros (letterboxed to each model's input shape), call the
+Python entry point directly: `uv run python tests/stage2.py --image tests/image.jpg`.
+The packaged stage 2 (below) does this automatically.
 
 ### Run via pytest
 
@@ -168,6 +179,21 @@ pytest tests/test_models.py -v
 
 These checks run in CI on every push and are a good sanity check after adding a new model.
 
+The runtime itself has separate hardware-free unit tests (mock DX-RT) in
+[`../runtime-library/test`](../runtime-library/README.md#unit-tests); CI runs them too.
+
+---
+
+## CI
+
+`build.yml` always runs the unit tests above. The `integration-tests` job (stage 1 → stage 2) is
+**opt-in** because it needs a Docker-capable self-hosted runner and, for stage 2, DeepX hardware:
+
+| Repository variable | Enables |
+|---|---|
+| `RUN_INTEGRATION_TESTS=true` | stage 1 (conversion) |
+| `RUN_STAGE2=true` | stage 2 (inference) — only set on a runner with a DeepX NPU |
+
 ---
 
 ## Packaging Stage 2 for a remote machine
@@ -176,7 +202,7 @@ These checks run in CI on every push and are a good sanity check after adding a 
 bash tests/package_stage2.sh
 ```
 
-Builds `libRuntimeLibrary.so` and `inference_runner` for **x86_64 and aarch64**, then bundles everything with the compiled DXNN models into a single archive. Already-built artifacts are reused automatically.
+Builds `libRuntimeLibrary.so` and `inference_runner` for **x86_64 and aarch64**, then bundles everything with the compiled DXNN models, the sample image and its pre-processed raw inputs (so the target needs no OpenCV) into a single archive. Already-built artifacts are reused automatically.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -220,3 +246,4 @@ cd deepx-stage2-<version>
 | `test_models.py` | `models.py` metadata (keys, shapes, dtypes, sizes) | Nothing |
 | `test_conversion.py` | Stage 1 — DXNN files produced and convert.log shows success | Docker + toolchain image |
 | `test_inference.py` | Stage 2 — inference_runner exits 0, metrics are valid | DeepX hardware + built runtime |
+| `stage1.py` / `stage2.py` | Entry points that run stage 1 (pytest) / stage 2 (all compiled models, prints a metrics table) | see above |

@@ -91,7 +91,8 @@ Before conversion, package your ONNX model into a `.zip` archive following the r
 
 #### Using Sample Models (Optional)
 
-Sample models and a calibration dataset are available from `sdk.deepx.ai` for testing:
+Sample models and a calibration dataset are available from `sdk.deepx.ai` for testing.
+Note that the YOLO samples are Ultralytics-derived (AGPL-3.0): use them for evaluation only.
 
 ```bash
 # Download a sample model (ONNX + JSON config)

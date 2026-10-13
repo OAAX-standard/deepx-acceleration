@@ -55,11 +55,20 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 ## Compatibility
 
 - **Supported Chips**: DX-M1, DX-H1 
-- **Required DX-RT version**: Must match the version used during the runtime-library build process
+- **OAAX version**: 2.0 (callback-based C API, see [`runtime-library/include/runtime_core.h`](runtime-library/include/runtime_core.h))
+- **Required DX-RT version**: Must match the version used during the runtime-library build process. The version used by this repo is pinned in `runtime-library/dxrt_version.txt` (Linux) and `runtime-library/dxrt_windows_commit.txt` (Windows)
 
 > On Linux, the runtime-library is built inside a Docker environment that mimics the target architecture and OS version, with DeepX Runtime (DX-RT) preinstalled. Therefore, the resulting `libRuntimeLibrary.so` must be used in a runtime environment that matches the same architecture, OS version, and has the same DX-RT version installed.
 >
 > On Windows, the runtime-library is built natively using CMake and Visual Studio against the DX-RT Windows SDK. The resulting `RuntimeLibrary.dll` must be used with a matching DX-RT Windows SDK version.
+
+---
+
+## Testing
+
+- **Unit tests** (no hardware, run in CI): `pytest tests/test_models.py` and the mock-DX-RT runtime tests in [`runtime-library/test`](runtime-library/README.md#unit-tests).
+- **Conversion + inference tests** (Docker, and DeepX hardware for inference): see the [test suite guide](tests/README.md).
+- **Linting**: `pre-commit run --all-files` (ruff, clang-format, shellcheck, hadolint) — the same checks CI runs.
 
 ---
 
@@ -73,4 +82,5 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 ## License
 
 This project is licensed under the **Apache License 2.0**.  
-See the [LICENSE](LICENSE) file for full license text.
+See the [LICENSE](LICENSE) file for full license text. Vendored third-party code is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+DX-RT and DX-COM are proprietary DEEPX software and are not covered by this license.
