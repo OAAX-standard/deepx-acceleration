@@ -27,8 +27,7 @@
 
 class BufferPool {
 public:
-    BufferPool(size_t buf_size, size_t hard_cap)
-        : buf_size_(buf_size), hard_cap_(hard_cap == 0 ? 1 : hard_cap) {}
+    BufferPool(size_t buf_size, size_t hard_cap) : buf_size_(buf_size), hard_cap_(hard_cap == 0 ? 1 : hard_cap) {}
 
     ~BufferPool() {
         std::lock_guard<std::mutex> lk(mtx_);

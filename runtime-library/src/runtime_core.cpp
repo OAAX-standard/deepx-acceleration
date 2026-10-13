@@ -17,6 +17,11 @@
 //     straight to RunAsync and kept alive (owned by the JobData) until the
 //     completion callback fires, by which point DX-RT's asynchronous input
 //     encoding has already consumed it.  No input buffer pool, no input memcpy.
+//     NOTE: this relies on DX-RT consuming the input before the callback and on
+//     the driver tolerating a fresh pointer per RunAsync.  An earlier revision
+//     pooled inputs because fresh pointers hit DMA errno=-70 (WRITE_INPUT) after
+//     ~10 runs on a fast model.  Re-validate on hardware (10k pipelined runs of
+//     squeezenet1_1) after any DX-RT upgrade.
 //   - The output buffer pool grows lazily up to DXRT_TASK_MAX_LOAD_VALUE ×
 //     NumDevice, matching DX-RT's own in-flight limit.  It caps memory and
 //     applies backpressure without manual tuning: a 1-channel setup uses a
@@ -24,12 +29,14 @@
 
 #include "runtime_core.h"
 
+#include <concurrentqueue.h>
 #include <dxrt/dxrt_api.h>
 #include <spdlog/cfg/env.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -42,8 +49,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <concurrentqueue.h>
 
 #include "buffer_pool.h"
 
@@ -75,7 +80,7 @@ struct JobData {
 // lock-free queue).
 // ---------------------------------------------------------------------------
 class OutputSemaphore {
-   public:
+public:
     void signal() {
         std::lock_guard<std::mutex> lk(m_);
         ++count_;
@@ -104,7 +109,7 @@ class OutputSemaphore {
         cv_.notify_all();
     }
 
-   private:
+private:
     std::mutex m_;
     std::condition_variable cv_;
     long count_{0};
@@ -142,8 +147,17 @@ moodycamel::ConcurrentQueue<JobData *> g_output_queue;
 // instead of busy-polling the lock-free queue.
 OutputSemaphore g_output_sem;
 
+// Last error text.  Set from any API thread, so it is guarded by a mutex;
+// runtime_get_error() returns a per-thread copy so the pointer stays valid.
 std::string g_last_error;
-std::string g_info_json;
+std::mutex g_error_mtx;
+
+// Records `msg` as the last error.  Does not log: some errors (e.g. output
+// pool backpressure) are expected on the hot path.
+void set_error(const std::string &msg) {
+    std::lock_guard<std::mutex> lk(g_error_mtx);
+    g_last_error = msg;
+}
 
 // ---------------------------------------------------------------------------
 // Tensor helpers
@@ -164,25 +178,33 @@ void deep_free_tensors(Tensors *t) {
 
 TensorElementType map_data_type(dxrt::DataType dtype) {
     switch (dtype) {
-        case dxrt::UINT8:  return DATA_TYPE_UINT8;
-        case dxrt::UINT16: return DATA_TYPE_UINT16;
-        case dxrt::UINT32: return DATA_TYPE_UINT32;
-        case dxrt::UINT64: return DATA_TYPE_UINT64;
-        case dxrt::INT8:   return DATA_TYPE_INT8;
-        case dxrt::INT16:  return DATA_TYPE_INT16;
-        case dxrt::INT32:  return DATA_TYPE_INT32;
-        case dxrt::INT64:  return DATA_TYPE_INT64;
-        case dxrt::FLOAT:  return DATA_TYPE_FLOAT;
-        default:           return DATA_TYPE_UNDEFINED;
+        case dxrt::UINT8:
+            return DATA_TYPE_UINT8;
+        case dxrt::UINT16:
+            return DATA_TYPE_UINT16;
+        case dxrt::UINT32:
+            return DATA_TYPE_UINT32;
+        case dxrt::UINT64:
+            return DATA_TYPE_UINT64;
+        case dxrt::INT8:
+            return DATA_TYPE_INT8;
+        case dxrt::INT16:
+            return DATA_TYPE_INT16;
+        case dxrt::INT32:
+            return DATA_TYPE_INT32;
+        case dxrt::INT64:
+            return DATA_TYPE_INT64;
+        case dxrt::FLOAT:
+            return DATA_TYPE_FLOAT;
+        default:
+            return DATA_TYPE_UNDEFINED;
     }
 }
 
-Tensors *build_output_tensors(const ModelContext &ctx, int request_id,
-                              const dxrt::TensorPtrs &outputs) {
+Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const dxrt::TensorPtrs &outputs) {
     const int num = static_cast<int>(outputs.size());
     if (num == 0 || static_cast<int>(ctx.output_sizes.size()) != num) {
-        spdlog::error("Output tensor count mismatch: dxrt={}, expected={}", num,
-                      ctx.output_sizes.size());
+        spdlog::error("Output tensor count mismatch: dxrt={}, expected={}", num, ctx.output_sizes.size());
         return nullptr;
     }
 
@@ -206,7 +228,8 @@ Tensors *build_output_tensors(const ModelContext &ctx, int request_id,
         t->tensors[i].name = strdup(name.c_str());
         t->tensors[i].data_type = map_data_type(dtype);
         t->tensors[i].rank = static_cast<int>(shape.size());
-        t->tensors[i].shape = static_cast<int *>(std::malloc(shape.size() * sizeof(int)));
+        // malloc(0) may return NULL, which would be mistaken for OOM on rank-0 (scalar) outputs.
+        t->tensors[i].shape = static_cast<int *>(std::malloc(std::max<size_t>(shape.size(), 1) * sizeof(int)));
         t->tensors[i].data_size = size;
         t->tensors[i].data = std::malloc(size);
 
@@ -247,7 +270,7 @@ size_t compute_pool_capacity() {
 
 RuntimeStatus runtime_init(Config config) {
     if (g_initialized.load()) {
-        g_last_error = "Runtime already initialized";
+        set_error("Runtime already initialized");
         return RUNTIME_STATUS_ALREADY_INITIALIZED;
     }
 
@@ -269,10 +292,13 @@ RuntimeStatus runtime_init(Config config) {
     }
 
     try {
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("runtime.log", true);
+        // Log file defaults to ./runtime.log; DEEPX_RUNTIME_LOG_FILE overrides it.
+        const char *log_path = std::getenv("DEEPX_RUNTIME_LOG_FILE");
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+            (log_path && *log_path) ? log_path : "runtime.log", true);
         auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-        g_logger = std::make_shared<spdlog::logger>(
-            runtime_get_name(), spdlog::sinks_init_list{file_sink, stderr_sink});
+        g_logger =
+            std::make_shared<spdlog::logger>(runtime_get_name(), spdlog::sinks_init_list{file_sink, stderr_sink});
         spdlog::set_default_logger(g_logger);
         spdlog::set_level(spdlog::level::info);
         spdlog::flush_on(spdlog::level::warn);
@@ -284,8 +310,7 @@ RuntimeStatus runtime_init(Config config) {
 
     for (int i = 0; i < config.length; ++i) {
         if (config.keys[i]) {
-            spdlog::debug("Config[{}] = {}", config.keys[i],
-                          config.values[i] ? config.values[i] : "(null)");
+            spdlog::debug("Config[{}] = {}", config.keys[i], config.values[i] ? config.values[i] : "(null)");
         }
     }
 
@@ -296,37 +321,38 @@ RuntimeStatus runtime_init(Config config) {
 
 RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs) {
     if (!g_initialized.load()) {
-        g_last_error = "Runtime not initialized";
+        set_error("Runtime not initialized");
         return RUNTIME_STATUS_NOT_INITIALIZED;
     }
     if (num_models <= 0 || !model_configs) {
-        g_last_error = "Invalid argument";
+        set_error("Invalid argument");
         return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
     // Phase 1: single model only.  Future phases simply iterate.
     if (num_models != 1) {
-        g_last_error = "Multiple models not yet supported";
+        set_error("Multiple models not yet supported");
         return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
 
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         if (!g_models.empty()) {
-            g_last_error = "Model already loaded";
+            set_error("Model already loaded");
             return RUNTIME_STATUS_INVALID_ARGUMENT;
         }
     }
 
     const ModelConfig &mc = model_configs[0];
     if (!mc.file_path) {
-        g_last_error = "Model file path is null";
+        set_error("Model file path is null");
         return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
     {
         std::ifstream f(mc.file_path, std::ios::binary);
         if (!f) {
-            g_last_error = std::string("Model file not found: ") + mc.file_path;
-            spdlog::error("{}", g_last_error);
+            const std::string msg = std::string("Model file not found: ") + mc.file_path;
+            set_error(msg);
+            spdlog::error("{}", msg);
             return RUNTIME_STATUS_FILE_NOT_FOUND;
         }
     }
@@ -337,8 +363,9 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
     try {
         ctx->engine.reset(new dxrt::InferenceEngine(std::string(mc.file_path)));
     } catch (const std::exception &e) {
-        g_last_error = std::string("Failed to load model: ") + e.what();
-        spdlog::error("{}", g_last_error);
+        const std::string msg = std::string("Failed to load model: ") + e.what();
+        set_error(msg);
+        spdlog::error("{}", msg);
         return RUNTIME_STATUS_INVALID_MODEL;
     }
 
@@ -348,38 +375,37 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
 
     const size_t cap = compute_pool_capacity();
     ctx->output_pool.reset(new BufferPool(output_total, cap));
-    spdlog::info("Output pool capacity: {} (input_size={} bytes, output_size={} bytes)", cap,
-                 ctx->input_size, output_total);
+    spdlog::info("Output pool capacity: {} (input_size={} bytes, output_size={} bytes)", cap, ctx->input_size,
+                 output_total);
 
     // Register completion callback.  Captures the raw context pointer; the
     // engine is destroyed before the context, so this is safe.
     ModelContext *ctx_raw = ctx.get();
-    ctx_raw->engine->RegisterCallback(
-        [ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
-            auto *jd = static_cast<JobData *>(userArg);
-            if (jd) {
-                jd->dxrt_outputs = outputs;
-                // Inference is complete, so DX-RT's asynchronous input encoding
-                // has already read the caller's input.  Release it now (zero-copy
-                // path: nothing was copied at enqueue time).
-                if (jd->input_tensors) {
-                    deep_free_tensors(jd->input_tensors);
-                    jd->input_tensors = nullptr;
-                }
-                // Lock-free push, then signal a waiting consumer.
-                g_output_queue.enqueue(jd);
-                g_output_sem.signal();
+    ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
+        auto *jd = static_cast<JobData *>(userArg);
+        if (jd) {
+            jd->dxrt_outputs = outputs;
+            // Inference is complete, so DX-RT's asynchronous input encoding
+            // has already read the caller's input.  Release it now (zero-copy
+            // path: nothing was copied at enqueue time).
+            if (jd->input_tensors) {
+                deep_free_tensors(jd->input_tensors);
+                jd->input_tensors = nullptr;
             }
-            // Decrement in-flight count.  The atomic itself is the source of
-            // truth; we only take the lock + notify on the 0-transition, which
-            // is all cleanup waits for.  This keeps the steady-state completion
-            // path lock-free (the common N->N-1 case touches only the atomic).
-            if (ctx_raw->in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                std::lock_guard<std::mutex> lk(ctx_raw->in_flight_mtx);
-                ctx_raw->in_flight_cv.notify_all();
-            }
-            return 0;
-        });
+            // Lock-free push, then signal a waiting consumer.
+            g_output_queue.enqueue(jd);
+            g_output_sem.signal();
+        }
+        // Decrement in-flight count.  The atomic itself is the source of
+        // truth; we only take the lock + notify on the 0-transition, which
+        // is all cleanup waits for.  This keeps the steady-state completion
+        // path lock-free (the common N->N-1 case touches only the atomic).
+        if (ctx_raw->in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lk(ctx_raw->in_flight_mtx);
+            ctx_raw->in_flight_cv.notify_all();
+        }
+        return 0;
+    });
 
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
@@ -390,15 +416,15 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
 
 RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     if (!g_initialized.load()) {
-        g_last_error = "Runtime not initialized";
+        set_error("Runtime not initialized");
         return RUNTIME_STATUS_NOT_INITIALIZED;
     }
     if (g_shutting_down.load()) {
-        g_last_error = "Runtime is shutting down";
+        set_error("Runtime is shutting down");
         return RUNTIME_STATUS_ERROR;
     }
     if (!input_tensors || input_tensors->num_tensors < 1 || !input_tensors->tensors) {
-        g_last_error = "Invalid input tensors";
+        set_error("Invalid input tensors");
         return RUNTIME_STATUS_INVALID_TENSOR;
     }
 
@@ -406,11 +432,11 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         if (g_models.empty()) {
-            g_last_error = "Model not loaded";
+            set_error("Model not loaded");
             return RUNTIME_STATUS_MODEL_NOT_LOADED;
         }
         if (model_id < 0 || static_cast<size_t>(model_id) >= g_models.size()) {
-            g_last_error = "Invalid model_id";
+            set_error("Invalid model_id");
             return RUNTIME_STATUS_INVALID_MODEL_ID;
         }
         ctx = g_models[model_id].get();
@@ -423,9 +449,10 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     // Reject it; the caller keeps ownership of input_tensors.
     const size_t in_bytes = input_tensors->tensors[0].data_size;
     if (in_bytes != ctx->input_size) {
-        g_last_error = "Input size " + std::to_string(in_bytes) +
-                       " does not match model input size " + std::to_string(ctx->input_size);
-        spdlog::error("{}", g_last_error);
+        const std::string msg = "Input size " + std::to_string(in_bytes) + " does not match model input size " +
+                                std::to_string(ctx->input_size);
+        set_error(msg);
+        spdlog::error("{}", msg);
         return RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH;
     }
 
@@ -436,7 +463,7 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     // stays with the caller on any non-success return.
     void *outputs_ptr = ctx->output_pool->try_acquire();
     if (!outputs_ptr) {
-        g_last_error = "Output pool exhausted (backpressure)";
+        set_error("Output pool exhausted (backpressure)");
         return RUNTIME_STATUS_TIMEOUT;
     }
 
@@ -463,8 +490,9 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
             ctx->in_flight_cv.notify_all();
         }
         ctx->output_pool->release(outputs_ptr);
-        g_last_error = std::string("RunAsync failed: ") + e.what();
-        spdlog::error("{}", g_last_error);
+        const std::string msg = std::string("RunAsync failed: ") + e.what();
+        set_error(msg);
+        spdlog::error("{}", msg);
         // Caller retains ownership of input_tensors on failure — do not free.
         return RUNTIME_STATUS_INFERENCE_ERROR;
     }
@@ -478,12 +506,12 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
 
 RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, int timeout_ms) {
     if (!output_tensors) {
-        g_last_error = "output_tensors pointer is null";
+        set_error("output_tensors pointer is null");
         return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
     *output_tensors = nullptr;
     if (!g_initialized.load()) {
-        g_last_error = "Runtime not initialized";
+        set_error("Runtime not initialized");
         return RUNTIME_STATUS_NOT_INITIALIZED;
     }
 
@@ -507,7 +535,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
         if (jd->model_id < 0 || static_cast<size_t>(jd->model_id) >= g_models.size()) {
             // Should not happen unless cleanup races with retrieve.
             delete jd;
-            g_last_error = "Stale model_id in output";
+            set_error("Stale model_id in output");
             return RUNTIME_STATUS_ERROR;
         }
         ctx = g_models[jd->model_id].get();
@@ -522,7 +550,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     delete jd;
 
     if (!result) {
-        g_last_error = "Failed to build output tensors";
+        set_error("Failed to build output tensors");
         return RUNTIME_STATUS_OUT_OF_MEMORY;
     }
 
@@ -581,7 +609,10 @@ RuntimeStatus runtime_cleanup(void) {
 
     g_initialized.store(false);
     g_shutting_down.store(false);
-    g_last_error.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_error_mtx);
+        g_last_error.clear();
+    }
 
     spdlog::info("Runtime cleanup done");
     if (g_logger) {
@@ -592,7 +623,14 @@ RuntimeStatus runtime_cleanup(void) {
 }
 
 const char *runtime_get_error(void) {
-    return g_last_error.empty() ? nullptr : g_last_error.c_str();
+    // Per-thread copy: the pointer stays valid until this thread's next call,
+    // even if another thread records a new error meanwhile.
+    static thread_local std::string snapshot;
+    {
+        std::lock_guard<std::mutex> lk(g_error_mtx);
+        snapshot = g_last_error;
+    }
+    return snapshot.empty() ? nullptr : snapshot.c_str();
 }
 
 const char *runtime_get_version(void) { return OAAX_RUNTIME_VERSION; }
@@ -629,6 +667,8 @@ const char *runtime_get_info(void) {
                   "\"output_queue\": %zu, \"pool_in_use\": %zu, "
                   "\"pool_size\": %zu, \"pool_capacity\": %zu}",
                   loaded, in_flight, queued, pool_in_use, pool_size, pool_capacity);
-    g_info_json = buf;
-    return g_info_json.c_str();
+    // Per-thread storage so concurrent callers don't overwrite each other's string.
+    static thread_local std::string info_json;
+    info_json = buf;
+    return info_json.c_str();
 }
