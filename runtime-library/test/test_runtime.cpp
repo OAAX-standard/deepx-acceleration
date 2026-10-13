@@ -8,13 +8,16 @@
 #include <unordered_set>
 #include <vector>
 
+#include "dxrt/dxrt_api.h"  // mock: scalar_output() test knob
 #include "runtime_core.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-static Tensors *make_input(int id) {
+static const size_t kModelInputBytes = 1 * 3 * 224 * 224 * sizeof(float);
+
+static Tensors *make_input(int id, size_t data_size = kModelInputBytes) {
     Tensors *t = (Tensors *)malloc(sizeof(Tensors));
     assert(t);
     t->id = id;
@@ -30,7 +33,6 @@ static Tensors *make_input(int id) {
     int shape[] = {1, 3, 224, 224};
     memcpy(t->tensors[0].shape, shape, sizeof(shape));
 
-    size_t data_size = 1 * 3 * 224 * 224 * sizeof(float);
     t->tensors[0].data_size = data_size;
     t->tensors[0].data = malloc(data_size);
     assert(t->tensors[0].data);
@@ -214,7 +216,11 @@ static void test_async_pipeline() {
     std::thread producer([&]() {
         for (int i = 0; i < NUM_REQUESTS; i++) {
             Tensors *input = make_input(i);
-            RuntimeStatus s = runtime_enqueue_input(0, input);
+            // TIMEOUT = output pool exhausted (backpressure); the caller keeps the input and retries.
+            RuntimeStatus s;
+            while ((s = runtime_enqueue_input(0, input)) == RUNTIME_STATUS_TIMEOUT) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             assert(s == RUNTIME_STATUS_SUCCESS);
             // Vary timing
             if (i % 7 == 0) {
@@ -298,11 +304,160 @@ static void test_get_info() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8: Input size validation
+// ---------------------------------------------------------------------------
+
+static void test_input_size_mismatch() {
+    printf("=== test_input_size_mismatch ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc{};
+    mc.file_path = "dummy.dxnn";
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    // Both undersized and oversized inputs are rejected; the caller keeps ownership.
+    Tensors *small = make_input(1, kModelInputBytes - 4);
+    assert(runtime_enqueue_input(0, small) == RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH);
+    free_output(small);
+    Tensors *big = make_input(2, kModelInputBytes + 4);
+    assert(runtime_enqueue_input(0, big) == RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH);
+    free_output(big);
+
+    assert(runtime_get_error() != nullptr);
+    assert(strstr(runtime_get_error(), "does not match") != nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Backpressure — output pool exhaustion returns TIMEOUT, then recovers
+// ---------------------------------------------------------------------------
+
+static void test_backpressure() {
+    printf("=== test_backpressure ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc{};
+    mc.file_path = "dummy.dxnn";
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    // Pool capacity = DXRT_TASK_MAX_LOAD_VALUE x mock device count (2).
+    const int capacity = DXRT_TASK_MAX_LOAD_VALUE * 2;
+    for (int i = 0; i < capacity; i++) {
+        assert(runtime_enqueue_input(0, make_input(i)) == RUNTIME_STATUS_SUCCESS);
+    }
+
+    // Outputs are only released on retrieve, so the next enqueue must fail fast.
+    Tensors *rejected = make_input(capacity);
+    assert(runtime_enqueue_input(0, rejected) == RUNTIME_STATUS_TIMEOUT);
+    free_output(rejected);  // caller keeps ownership on failure
+
+    for (int i = 0; i < capacity; i++) {
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(nullptr, &output, 1000) == RUNTIME_STATUS_SUCCESS);
+        free_output(output);
+    }
+
+    // Buffers are back in the pool: enqueue works again.
+    assert(runtime_enqueue_input(0, make_input(1000)) == RUNTIME_STATUS_SUCCESS);
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(nullptr, &output, 1000) == RUNTIME_STATUS_SUCCESS);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Rank-0 (scalar) output tensors are returned, not treated as OOM
+// ---------------------------------------------------------------------------
+
+static void test_scalar_output() {
+    printf("=== test_scalar_output ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc{};
+    mc.file_path = "dummy.dxnn";
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    dxrt::scalar_output().store(true);
+    assert(runtime_enqueue_input(0, make_input(7)) == RUNTIME_STATUS_SUCCESS);
+    Tensors *output = nullptr;
+    RuntimeStatus s = runtime_retrieve_output(nullptr, &output, 1000);
+    dxrt::scalar_output().store(false);
+
+    assert(s == RUNTIME_STATUS_SUCCESS);
+    assert(output != nullptr && output->id == 7);
+    assert(output->tensors[0].rank == 0);
+    assert(output->tensors[0].shape != nullptr);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: runtime_get_error is null until an error happens, valid across threads
+// ---------------------------------------------------------------------------
+
+static void test_get_error_thread_safe() {
+    printf("=== test_get_error_thread_safe ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_get_error() == nullptr);
+
+    // Hammer error-setting and error-reading from several threads (run under TSan to check races).
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; t++) {
+        threads.emplace_back([]() {
+            for (int i = 0; i < 200; i++) {
+                Tensors *in = make_input(i);
+                assert(runtime_enqueue_input(0, in) == RUNTIME_STATUS_MODEL_NOT_LOADED);
+                free_output(in);
+                const char *err = runtime_get_error();
+                assert(err != nullptr && strcmp(err, "Model not loaded") == 0);
+            }
+        });
+    }
+    for (auto &t : threads) t.join();
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+static void test_model_file_not_found() {
+    printf("=== test_model_file_not_found ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc{};
+    mc.file_path = "does_not_exist.dxnn";
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_FILE_NOT_FOUND);
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
 int main() {
     printf("\n====== OAAX 2.0 Runtime Tests ======\n\n");
+
+    // The runtime checks the model file exists before handing it to DX-RT;
+    // the mock engine ignores its contents, so an empty placeholder suffices.
+    FILE *f = fopen("dummy.dxnn", "wb");
+    assert(f);
+    fclose(f);
 
     test_basic_lifecycle();
     test_load_without_init();
@@ -311,7 +466,13 @@ int main() {
     test_invalid_model_id();
     test_async_pipeline();
     test_get_info();
+    test_input_size_mismatch();
+    test_backpressure();
+    test_scalar_output();
+    test_get_error_thread_safe();
+    test_model_file_not_found();
 
+    remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");
     return 0;
 }

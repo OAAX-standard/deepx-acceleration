@@ -4,6 +4,12 @@ project(dx_oaax_test DESCRIPTION "OAAX 2.0 Runtime Test with Mock dxrt")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The tests rely on assert(); never let a Release build (-DNDEBUG) turn them into no-ops.
+add_compile_options(-UNDEBUG)
+if (MSVC)
+    add_compile_options(/UNDEBUG)
+endif()
+
 # Version define
 add_definitions(-DOAAX_RUNTIME_VERSION="2.0.0-test")
 
