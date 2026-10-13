@@ -3,7 +3,6 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPPORTED_UBUNTU_VERSIONS=("20.04" "22.04" "24.04")
 CROSS_AARCH64=false
-USE_CRT=false
 
 # Error handling
 error_exit() {
@@ -14,11 +13,10 @@ error_exit() {
 # Print usage
 show_usage() {
     cat << EOF
-Usage: $0 --ubuntu_version <ubuntu_version> [--cross-aarch64] [--crt]
-  --ubuntu_version:           (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
-  --cross-aarch64: (Optional) Cross-compile for aarch64 (only supported on x86_64 hosts)
-  --crt:          (Optional) Use SSL certificate (only required for DEEPX internal builds)
-  -h, --help:     Show this help message
+Usage: $0 --ubuntu_version <ubuntu_version> [--cross-aarch64]
+  --ubuntu_version: (Required) Ubuntu version (${SUPPORTED_UBUNTU_VERSIONS[*]})
+  --cross-aarch64:  (Optional) Cross-compile for aarch64 (only supported on x86_64 hosts)
+  -h, --help:       Show this help message
 
 Examples:
   $0 --ubuntu_version 22.04                         # Build for host architecture
@@ -32,15 +30,6 @@ validate_files() {
     local files_to_check=(
         "$SCRIPT_DIR/dx_rt"
     )
-
-    # Check for certificate file if --crt option is used
-    if [[ "$USE_CRT" == true ]]; then
-        if [[ ! -f "$SCRIPT_DIR/Fortinet_CA_SSL.crt" ]]; then
-            error_exit "Certificate file Fortinet_CA_SSL.crt not found in current directory. Required when using --crt option."
-        fi
-        echo "Certificate file found: $SCRIPT_DIR/Fortinet_CA_SSL.crt"
-        files_to_check+=("$SCRIPT_DIR/Fortinet_CA_SSL.crt")
-    fi
 
     for file in "${files_to_check[@]}"; do
         [[ ! -e "$file" ]] && error_exit "Required file/directory not found: $file"
@@ -93,7 +82,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --ubuntu_version) UBUNTU_VERSION="$2"; shift 2 ;;
         --cross-aarch64) CROSS_AARCH64=true; shift ;;
-        --crt) USE_CRT=true; shift ;;
         -h|--help) show_usage ;;
         *) error_exit "Unknown option: $1" ;;
     esac
@@ -122,18 +110,10 @@ esac
 # Determine target architecture and Dockerfile
 if [[ "$CROSS_AARCH64" == true ]]; then
     TARGET_ARCH="aarch64"
-    if [[ "$USE_CRT" == true ]]; then
-        DOCKERFILE="Dockerfile.cross-aarch64.crt"
-    else
-        DOCKERFILE="Dockerfile.cross-aarch64"
-    fi
+    DOCKERFILE="Dockerfile.cross-aarch64"
 else
     TARGET_ARCH="$HOST_ARCH"
-    if [[ "$USE_CRT" == true ]]; then
-        DOCKERFILE="Dockerfile.native.crt"
-    else
-        DOCKERFILE="Dockerfile.native"
-    fi
+    DOCKERFILE="Dockerfile.native"
 fi
 
 # Container and build setup
@@ -159,11 +139,6 @@ setup_artifacts_dir() {
 build_in_docker() {
     echo "===== Build process started ====="
     echo "Host Architecture: $HOST_ARCH, Target: $TARGET_ARCH, Ubuntu: $UBUNTU_VERSION, DX-RT Version: $DXRT_VERSION"
-    if [[ "$USE_CRT" == true ]]; then
-        echo "SSL certificate installation: Enabled"
-    else
-        echo "SSL certificate installation: Disabled"
-    fi
 
     # Remove existing Docker image
     if docker image inspect "$CONTAINER_NAME" &>/dev/null; then
