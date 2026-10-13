@@ -13,6 +13,8 @@ on:
 
 jobs:
   build-toolchain:
+    # Self-hosted runner: skip PRs from forks.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 10
     runs-on: hetzner
     container:
@@ -47,6 +49,8 @@ jobs:
           EOF
 
       - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             if [ -f VERSION ]; then
@@ -55,16 +59,44 @@ jobs:
               exit 1
             fi
           else
-            version=${{ github.head_ref }}
+            version="$HEAD_REF"
           fi
           echo "version=$version" >> $GITHUB_ENV
 
       - name: Upload Docker image to S3
         run: |
-          s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/oaax-deepx-toolchain.tar"
+          s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/latest/DEEPX/oaax-deepx-toolchain.tar"
           fi
+
+  unit-tests:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Runtime unit tests (mock DX-RT, no hardware needed)
+        run: |
+          cmake -S runtime-library/test -B build-unit-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-unit-tests -j"$(nproc)"
+          (cd build-unit-tests && ./test_runtime)
+
+      - name: Runtime unit tests under ASan + UBSan
+        run: |
+          cmake -S runtime-library/test -B build-unit-tests-san -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build build-unit-tests-san -j"$(nproc)"
+          (cd build-unit-tests-san && ./test_runtime)
+
+      - name: Python unit tests
+        run: |
+          pip install pytest
+          pytest tests/test_models.py
 
   build-runtime-ubuntu:
     timeout-minutes: 20
@@ -82,7 +114,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          lfs: true
 
       - name: Install s3cmd and Python dependencies
         run: |
@@ -121,6 +152,8 @@ jobs:
           EOF
 
       - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             if [ -f VERSION ]; then
@@ -129,14 +162,14 @@ jobs:
               exit 1
             fi
           else
-            version=${{ github.head_ref }}
+            version="$HEAD_REF"
           fi
           echo "version=$version" >> $GITHUB_ENV
 
       - name: Upload runtimes to S3
         run: |
           library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
-          s3cmd put "$library_file" "s3://oaax/runtimes/${{ env.version }}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          s3cmd put "$library_file" "s3://oaax/runtimes/${version}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             s3cmd put "$library_file" "s3://oaax/runtimes/latest/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
           fi
@@ -154,7 +187,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          lfs: true
 
       - name: Download DX RT
         shell: pwsh
@@ -185,6 +217,8 @@ jobs:
       - name: Determine version
         id: version
         shell: pwsh
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           if ("${{ github.ref }}" -eq "refs/heads/main") {
             if (Test-Path VERSION) {
@@ -193,7 +227,7 @@ jobs:
               throw "VERSION file missing"
             }
           } else {
-            $version = "${{ github.head_ref }}"
+            $version = $env:HEAD_REF
           }
           echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -227,8 +261,10 @@ jobs:
             s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$latestTargetKey"
           }
 
+  # Opt-in: set repository variable RUN_INTEGRATION_TESTS=true to enable stage 1 (conversion).
+  # Stage 2 additionally needs DeepX hardware on the runner: set RUN_STAGE2=true only then.
   integration-tests:
-    if: false
+    if: vars.RUN_INTEGRATION_TESTS == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 30
     runs-on: hetzner
     needs: [build-toolchain, build-runtime-ubuntu]
@@ -243,24 +279,25 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y git git-lfs docker.io python3 python3-pip s3cmd wget cmake g++
+          apt-get install -y git docker.io python3 python3-pip s3cmd wget cmake g++
           pip3 install uv
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          lfs: true
 
       - name: Set up Python environment
         run: uv sync -q
 
       - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             version=$(cat VERSION)
           else
-            version=${{ github.head_ref }}
+            version="$HEAD_REF"
           fi
           echo "version=$version" >> $GITHUB_ENV
 
@@ -268,12 +305,12 @@ jobs:
         run: |
           dxrt_version="v$(cat runtime-library/dxrt_version.txt)"
           mkdir -p runtime-library/artifacts/x86_64-ubuntu22.04
-          wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${{ env.version }}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
+          wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${version}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
           tar xzf /tmp/library.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
 
       - name: Load toolchain Docker image
         run: |
-          wget -q "https://oaax.nbg1.your-objectstorage.com/conversion-toolchain/${{ env.version }}/DEEPX/oaax-deepx-toolchain.tar" -O /tmp/toolchain.tar  # check-secrets-ignore: public artifact storage
+          wget -q "https://oaax.nbg1.your-objectstorage.com/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar" -O /tmp/toolchain.tar  # check-secrets-ignore: public artifact storage
           docker load -i /tmp/toolchain.tar
           rm /tmp/toolchain.tar
 
@@ -295,10 +332,11 @@ jobs:
           retention-days: 1
 
       - name: Stage 2 — build inference runner and run inference tests
+        if: vars.RUN_STAGE2 == 'true'
         run: uv run python tests/stage2.py --csv tests/stage2_results.csv
 
       - name: Upload stage2 results
-        if: always()
+        if: always() && vars.RUN_STAGE2 == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: stage2-results
