@@ -172,7 +172,7 @@ for name in TEST_MODELS:
 PYEOF
     cd "$REPO_ROOT"
     cp "$SCRIPT_DIR"/test_inputs/*.raw "$PKG_DIR/test_inputs/" 2>/dev/null || true
-    echo "  test_inputs/ : $(ls "$PKG_DIR/test_inputs/" 2>/dev/null | wc -l) raw file(s)"
+    echo "  test_inputs/ : $(find "$PKG_DIR/test_inputs" -type f 2>/dev/null | wc -l) raw file(s)"
 fi
 
 # Launcher script (auto-detects arch at runtime)
@@ -181,11 +181,12 @@ cat > "$PKG_DIR/run_stage2.sh" << 'EOF'
 # Run DeepX stage2 inference tests on this machine.
 #
 # Configuration (all optional env vars):
-#   MODELS      Space-separated model names (default: all)
-#   RUNS        Number of timed inference runs (default: 100)
-#   WARMUP      Number of warmup runs (default: 10)
-#   CSV         Path to output CSV file
-#   LOG_LEVEL   DEBUG|INFO|WARNING|ERROR (default: INFO)
+#   MODELS          Space-separated model names (default: all)
+#   RUNS            Number of timed inference runs (default: 100)
+#   WARMUP          Number of warmup runs (default: 10)
+#   PIPELINE_DEPTH  In-flight inference requests (default: 4)
+#   CSV             Path to output CSV file
+#   LOG_LEVEL       DEBUG|INFO|WARNING|ERROR (default: INFO)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -203,9 +204,10 @@ export DEEPX_RUNNER_DIR="$BIN_DIR"
 export DEEPX_RUNTIME_LIB_DIR="$BIN_DIR"
 
 ARGS=(
-    --runs   "${RUNS:-100}"
-    --warmup "${WARMUP:-10}"
-    --log-level "${LOG_LEVEL:-INFO}"
+    --runs           "${RUNS:-100}"
+    --warmup         "${WARMUP:-10}"
+    --pipeline-depth "${PIPELINE_DEPTH:-4}"
+    --log-level      "${LOG_LEVEL:-INFO}"
 )
 [[ -n "$MODELS" ]] && ARGS+=(--models $MODELS)
 [[ -n "$CSV"    ]] && ARGS+=(--csv "$CSV")
@@ -231,7 +233,7 @@ Usage:
   ./run_stage2.sh
 
 With options:
-  MODELS="yolo8n" RUNS=200 CSV=results.csv ./run_stage2.sh
+  MODELS="yolo8n" RUNS=200 PIPELINE_DEPTH=8 CSV=results.csv ./run_stage2.sh
 
 A test image (image.jpg) is bundled and used automatically as model input.
 YOLO models will log detected bounding boxes from the first warmup run.
