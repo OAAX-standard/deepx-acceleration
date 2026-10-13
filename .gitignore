@@ -55,3 +55,6 @@ tests/compiled_models/
 .venv/
 tests/test_inputs/
 tests/detections/
+
+# Local shell output
+nohup.out
