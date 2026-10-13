@@ -149,8 +149,7 @@ def compiled_models() -> _LazyCompiledModels:
     """
     if not _docker_image_available():
         pytest.skip(
-            f"Docker image '{DOCKER_IMAGE}' not available. "
-            f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
+            f"Docker image '{DOCKER_IMAGE}' not available. " f"Override with: DEEPX_TOOLCHAIN_IMAGE=<image> pytest ..."
         )
 
     onnx_dir = COMPILED_DIR / "onnx"

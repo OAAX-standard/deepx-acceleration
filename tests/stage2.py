@@ -37,7 +37,9 @@ def _parse_args():
     parser.add_argument("--pipeline-depth", type=int, default=4, help="In-flight inference requests (default: 4)")
     parser.add_argument("--csv", metavar="FILE", help="Write results to a CSV file")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    parser.add_argument("--image", metavar="FILE", help="Image to use as inference input (letterbox-resized to model input shape)")
+    parser.add_argument(
+        "--image", metavar="FILE", help="Image to use as inference input (letterbox-resized to model input shape)"
+    )
     return parser.parse_args()
 
 

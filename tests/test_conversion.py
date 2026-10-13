@@ -25,9 +25,9 @@ class TestModelConversion:
     def test_dxnn_min_size(self, compiled_models, model_name):
         path = compiled_models[model_name]
         size = path.stat().st_size
-        assert size >= MIN_DXNN_SIZE_BYTES, (
-            f"{path.name} is suspiciously small: {size} bytes (expected >= {MIN_DXNN_SIZE_BYTES})"
-        )
+        assert (
+            size >= MIN_DXNN_SIZE_BYTES
+        ), f"{path.name} is suspiciously small: {size} bytes (expected >= {MIN_DXNN_SIZE_BYTES})"
 
     @pytest.mark.parametrize("model_name", ALL_MODELS)
     def test_convert_log_exists(self, compiled_models, model_name):
@@ -40,6 +40,6 @@ class TestModelConversion:
         if not log.exists():
             pytest.skip("convert.log not found")
         text = log.read_text()
-        assert "Conversion finished" in text, (
-            f"'Conversion finished' not found in convert.log — conversion may have failed:\n{text[-500:]}"
-        )
+        assert (
+            "Conversion finished" in text
+        ), f"'Conversion finished' not found in convert.log — conversion may have failed:\n{text[-500:]}"

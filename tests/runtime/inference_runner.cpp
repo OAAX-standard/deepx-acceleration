@@ -67,8 +67,7 @@ private:
 
 static int g_request_id = 0;
 
-static Tensors *make_input(size_t data_size, const std::vector<int> &shape,
-                           const uint8_t *image_buf = nullptr) {
+static Tensors *make_input(size_t data_size, const std::vector<int> &shape, const uint8_t *image_buf = nullptr) {
     Tensors *t = (Tensors *)malloc(sizeof(Tensors));
     if (!t) return nullptr;
 
@@ -86,8 +85,7 @@ static Tensors *make_input(size_t data_size, const std::vector<int> &shape,
     t->tensors[0].shape = nullptr;
     if (!shape.empty()) {
         t->tensors[0].shape = (int *)malloc(shape.size() * sizeof(int));
-        if (t->tensors[0].shape)
-            memcpy(t->tensors[0].shape, shape.data(), shape.size() * sizeof(int));
+        if (t->tensors[0].shape) memcpy(t->tensors[0].shape, shape.data(), shape.size() * sizeof(int));
     }
     t->tensors[0].data_size = data_size;
     t->tensors[0].data = malloc(data_size);
@@ -156,8 +154,8 @@ struct SharedState {
 // Producer: enqueues num_runs requests, bounded by semaphore
 // ---------------------------------------------------------------------------
 
-static void producer_thread(int num_runs, size_t input_size, const std::vector<int> &shape,
-                             Semaphore &sem, SharedState &state, const uint8_t *image_buf) {
+static void producer_thread(int num_runs, size_t input_size, const std::vector<int> &shape, Semaphore &sem,
+                            SharedState &state, const uint8_t *image_buf) {
     for (int i = 0; i < num_runs && !state.error.load(); i++) {
         sem.acquire();
 
@@ -190,8 +188,7 @@ static void producer_thread(int num_runs, size_t input_size, const std::vector<i
 // Consumer: retrieves num_runs outputs, records per-request latency
 // ---------------------------------------------------------------------------
 
-static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state,
-                             std::vector<double> &latencies_ms) {
+static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state, std::vector<double> &latencies_ms) {
     latencies_ms.reserve(num_runs);
 
     for (int i = 0; i < num_runs && !state.error.load(); i++) {
@@ -268,8 +265,8 @@ int main(int argc, char **argv) {
     }
 
     // Startup config summary
-    fprintf(stderr, "[config] model=%s input_size=%zu runs=%d warmup=%d pipeline_depth=%d\n",
-            model_path, input_size, num_runs, warmup, pipeline_depth);
+    fprintf(stderr, "[config] model=%s input_size=%zu runs=%d warmup=%d pipeline_depth=%d\n", model_path, input_size,
+            num_runs, warmup, pipeline_depth);
     if (!input_shape.empty()) {
         std::string shape_str = "[";
         for (size_t i = 0; i < input_shape.size(); i++)
@@ -281,9 +278,8 @@ int main(int argc, char **argv) {
     // Derive model name early so we can detect the YOLO family before warmup
     std::string path_str_early(model_path);
     size_t slash_early = path_str_early.rfind('/');
-    std::string model_name_early = (slash_early == std::string::npos)
-                                       ? path_str_early
-                                       : path_str_early.substr(slash_early + 1);
+    std::string model_name_early =
+        (slash_early == std::string::npos) ? path_str_early : path_str_early.substr(slash_early + 1);
     size_t dot_early = model_name_early.rfind('.');
     if (dot_early != std::string::npos) model_name_early = model_name_early.substr(0, dot_early);
 
@@ -321,8 +317,8 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < td.rank; j++)
                     shape_str += std::to_string(td.shape[j]) + (j + 1 < td.rank ? "," : "");
                 shape_str += "]";
-                fprintf(stderr, "[input tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n",
-                        i, td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
+                fprintf(stderr, "[input tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n", i,
+                        td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
             }
             free_tensors(inp);
             g_request_id = 0;
@@ -394,8 +390,8 @@ int main(int argc, char **argv) {
                 for (int k = 0; k < td.rank; k++)
                     shape_str += std::to_string(td.shape[k]) + (k + 1 < td.rank ? "," : "");
                 shape_str += "]";
-                fprintf(stderr, "[output tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n",
-                        j, td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
+                fprintf(stderr, "[output tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n", j,
+                        td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
             }
 
             if (yolo_family != yolo::Family::UNKNOWN) {
@@ -417,10 +413,9 @@ int main(int argc, char **argv) {
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
-    std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape),
-                         std::ref(sem), std::ref(state), img_buf);
-    std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state),
-                         std::ref(latencies_ms));
+    std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape), std::ref(sem), std::ref(state),
+                         img_buf);
+    std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state), std::ref(latencies_ms));
 
     producer.join();
     consumer.join();
@@ -450,12 +445,13 @@ int main(int argc, char **argv) {
     if (dot != std::string::npos) model_name = model_name.substr(0, dot);
 
     if (csv_mode) {
-        printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n",
-               model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, throughput_fps);
+        printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n", model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms,
+               throughput_fps);
     } else {
-        printf("model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
-               "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
-               model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, throughput_fps);
+        printf(
+            "model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
+            "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
+            model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, throughput_fps);
     }
 
     return 0;

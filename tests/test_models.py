@@ -51,6 +51,6 @@ class TestModelMetadata:
 
     @pytest.mark.parametrize("name,expected", EXPECTED_SIZES.items())
     def test_input_data_size(self, name, expected):
-        assert input_data_size(name) == expected, (
-            f"input_data_size('{name}') = {input_data_size(name)}, expected {expected}"
-        )
+        assert (
+            input_data_size(name) == expected
+        ), f"input_data_size('{name}') = {input_data_size(name)}, expected {expected}"

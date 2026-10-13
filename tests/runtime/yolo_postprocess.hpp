@@ -19,13 +19,13 @@
  *   conf_threshold = 0.25, iou_threshold = 0.45, max_detections = 300
  */
 
-#include "runtime_core.h"
-
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "runtime_core.h"
 
 namespace yolo {
 
@@ -38,7 +38,7 @@ enum class Family { YOLO8_11, YOLO26, UNKNOWN };
 struct Detection {
     float x1, y1, x2, y2;
     float score;
-    int   class_id;
+    int class_id;
 };
 
 // ---------------------------------------------------------------------------
@@ -51,8 +51,8 @@ inline Family detect_family(const std::string &model_name) {
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
 
     if (name.find("yolo26") != std::string::npos) return Family::YOLO26;
-    if (name.find("yolo8")  != std::string::npos) return Family::YOLO8_11;
-    if (name.find("yolo9")  != std::string::npos) return Family::YOLO8_11;
+    if (name.find("yolo8") != std::string::npos) return Family::YOLO8_11;
+    if (name.find("yolo9") != std::string::npos) return Family::YOLO8_11;
     if (name.find("yolo10") != std::string::npos) return Family::YOLO8_11;
     if (name.find("yolo11") != std::string::npos) return Family::YOLO8_11;
     if (name.find("yolo12") != std::string::npos) return Family::YOLO8_11;
@@ -79,12 +79,10 @@ inline float iou(const Detection &a, const Detection &b) {
 }
 
 // Greedy per-class NMS (same algorithm as nxai reference postprocessors)
-inline std::vector<Detection> nms(std::vector<Detection> boxes,
-                                   float iou_threshold, int max_detections) {
-    std::sort(boxes.begin(), boxes.end(),
-              [](const Detection &a, const Detection &b) { return a.score > b.score; });
+inline std::vector<Detection> nms(std::vector<Detection> boxes, float iou_threshold, int max_detections) {
+    std::sort(boxes.begin(), boxes.end(), [](const Detection &a, const Detection &b) { return a.score > b.score; });
 
-    std::vector<bool>      suppressed(boxes.size(), false);
+    std::vector<bool> suppressed(boxes.size(), false);
     std::vector<Detection> result;
     result.reserve(std::min((int)boxes.size(), max_detections));
 
@@ -94,37 +92,33 @@ inline std::vector<Detection> nms(std::vector<Detection> boxes,
         for (size_t j = i + 1; j < boxes.size(); ++j) {
             if (suppressed[j]) continue;
             if (boxes[j].class_id != boxes[i].class_id) continue;
-            if (iou(boxes[i], boxes[j]) > iou_threshold)
-                suppressed[j] = true;
+            if (iou(boxes[i], boxes[j]) > iou_threshold) suppressed[j] = true;
         }
     }
     return result;
 }
 
 // Return float pointer for the first FLOAT32 tensor, or nullptr
-inline const float *first_float_tensor(const Tensors *out, int &rank,
-                                        const int *&shape) {
+inline const float *first_float_tensor(const Tensors *out, int &rank, const int *&shape) {
     if (!out || out->num_tensors == 0) return nullptr;
     const TensorDescriptor &td = out->tensors[0];
     if (td.data_type != DATA_TYPE_FLOAT) return nullptr;
-    rank  = td.rank;
+    rank = td.rank;
     shape = td.shape;
     return static_cast<const float *>(td.data);
 }
 
-} // namespace detail
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // Decoders
 // ---------------------------------------------------------------------------
 
 // YOLOv8/11 family: tensor [4+C, N] or [1, 4+C, N]
-inline std::vector<Detection> decode_yolo8_11(const Tensors *out,
-                                               float conf_threshold,
-                                               float iou_threshold,
-                                               int   max_detections) {
-    int         rank  = 0;
-    const int  *shape = nullptr;
+inline std::vector<Detection> decode_yolo8_11(const Tensors *out, float conf_threshold, float iou_threshold,
+                                              int max_detections) {
+    int rank = 0;
+    const int *shape = nullptr;
     const float *data = detail::first_float_tensor(out, rank, shape);
     if (!data) {
         fprintf(stderr, "[yolo8/11] output tensor is missing or not FLOAT32\n");
@@ -133,10 +127,10 @@ inline std::vector<Detection> decode_yolo8_11(const Tensors *out,
 
     size_t rows, n_anchors;
     if (rank == 3 && shape[0] == 1) {
-        rows      = (size_t)shape[1];
+        rows = (size_t)shape[1];
         n_anchors = (size_t)shape[2];
     } else if (rank == 2) {
-        rows      = (size_t)shape[0];
+        rows = (size_t)shape[0];
         n_anchors = (size_t)shape[1];
     } else {
         fprintf(stderr, "[yolo8/11] unexpected tensor rank %d\n", rank);
@@ -154,31 +148,30 @@ inline std::vector<Detection> decode_yolo8_11(const Tensors *out,
 
     for (size_t i = 0; i < n_anchors; ++i) {
         float best_score = 0.0f;
-        int   best_class = 0;
+        int best_class = 0;
         for (size_t c = 0; c < n_classes; ++c) {
             float s = data[(4 + c) * n_anchors + i];
-            if (s > best_score) { best_score = s; best_class = (int)c; }
+            if (s > best_score) {
+                best_score = s;
+                best_class = (int)c;
+            }
         }
         if (best_score < conf_threshold) continue;
 
         float cx = data[0 * n_anchors + i];
         float cy = data[1 * n_anchors + i];
-        float w  = data[2 * n_anchors + i];
-        float h  = data[3 * n_anchors + i];
-        candidates.push_back({cx - w / 2.0f, cy - h / 2.0f,
-                               cx + w / 2.0f, cy + h / 2.0f,
-                               best_score, best_class});
+        float w = data[2 * n_anchors + i];
+        float h = data[3 * n_anchors + i];
+        candidates.push_back({cx - w / 2.0f, cy - h / 2.0f, cx + w / 2.0f, cy + h / 2.0f, best_score, best_class});
     }
 
     return detail::nms(candidates, iou_threshold, max_detections);
 }
 
 // YOLO26 family: tensor [N, 6] or [1, N, 6] — already decoded + NMS'd
-inline std::vector<Detection> decode_yolo26(const Tensors *out,
-                                             float conf_threshold,
-                                             int   max_detections) {
-    int         rank  = 0;
-    const int  *shape = nullptr;
+inline std::vector<Detection> decode_yolo26(const Tensors *out, float conf_threshold, int max_detections) {
+    int rank = 0;
+    const int *shape = nullptr;
     const float *data = detail::first_float_tensor(out, rank, shape);
     if (!data) {
         fprintf(stderr, "[yolo26] output tensor is missing or not FLOAT32\n");
@@ -187,10 +180,10 @@ inline std::vector<Detection> decode_yolo26(const Tensors *out,
 
     size_t n_preds, row_size;
     if (rank == 3 && shape[0] == 1) {
-        n_preds  = (size_t)shape[1];
+        n_preds = (size_t)shape[1];
         row_size = (size_t)shape[2];
     } else if (rank == 2) {
-        n_preds  = (size_t)shape[0];
+        n_preds = (size_t)shape[0];
         row_size = (size_t)shape[1];
     } else {
         fprintf(stderr, "[yolo26] unexpected tensor rank %d\n", rank);
@@ -217,11 +210,8 @@ inline std::vector<Detection> decode_yolo26(const Tensors *out,
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
-inline std::vector<Detection> postprocess(const Tensors *out,
-                                           Family family,
-                                           float  conf_threshold  = 0.25f,
-                                           float  iou_threshold   = 0.45f,
-                                           int    max_detections  = 300) {
+inline std::vector<Detection> postprocess(const Tensors *out, Family family, float conf_threshold = 0.25f,
+                                          float iou_threshold = 0.45f, int max_detections = 300) {
     switch (family) {
         case Family::YOLO8_11:
             return decode_yolo8_11(out, conf_threshold, iou_threshold, max_detections);
@@ -242,11 +232,10 @@ inline void log_detections(const std::vector<Detection> &dets, const char *tag) 
     size_t limit = std::min(dets.size(), (size_t)10);
     for (size_t i = 0; i < limit; ++i) {
         const Detection &d = dets[i];
-        fprintf(stderr, "[%s]   [%zu] class=%d score=%.3f box=[%.1f,%.1f,%.1f,%.1f]\n",
-                tag, i, d.class_id, d.score, d.x1, d.y1, d.x2, d.y2);
+        fprintf(stderr, "[%s]   [%zu] class=%d score=%.3f box=[%.1f,%.1f,%.1f,%.1f]\n", tag, i, d.class_id, d.score,
+                d.x1, d.y1, d.x2, d.y2);
     }
-    if (dets.size() > limit)
-        fprintf(stderr, "[%s]   ... and %zu more\n", tag, dets.size() - limit);
+    if (dets.size() > limit) fprintf(stderr, "[%s]   ... and %zu more\n", tag, dets.size() - limit);
 }
 
-} // namespace yolo
+}  // namespace yolo

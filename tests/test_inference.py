@@ -48,11 +48,7 @@ def _find_runner() -> Path | None:
 
 
 def _compiled_model_names() -> list[str]:
-    return [
-        dxnn.parent.name
-        for dxnn in sorted(COMPILED_DIR.glob("*/*.dxnn"))
-        if dxnn.parent.name in TEST_MODELS
-    ]
+    return [dxnn.parent.name for dxnn in sorted(COMPILED_DIR.glob("*/*.dxnn")) if dxnn.parent.name in TEST_MODELS]
 
 
 # ---------------------------------------------------------------------------
@@ -98,20 +94,23 @@ def test_inference_succeeds(runner, model_name):
     result = subprocess.run(
         [
             str(runner),
-            "--model", str(dxnn),
-            "--input-size", str(input_data_size(model_name)),
-            "--input-shape", shape,
-            "--runs", str(_TEST_RUNS),
-            "--warmup", str(_TEST_WARMUP),
+            "--model",
+            str(dxnn),
+            "--input-size",
+            str(input_data_size(model_name)),
+            "--input-shape",
+            shape,
+            "--runs",
+            str(_TEST_RUNS),
+            "--warmup",
+            str(_TEST_WARMUP),
             "--csv",
         ],
         capture_output=True,
         text=True,
         timeout=120,
     )
-    assert result.returncode == 0, (
-        f"inference_runner failed for '{model_name}':\n{result.stderr.strip()}"
-    )
+    assert result.returncode == 0, f"inference_runner failed for '{model_name}':\n{result.stderr.strip()}"
 
     line = result.stdout.strip()
     parts = line.split(",")
@@ -127,11 +126,16 @@ def test_inference_metrics_valid(runner, model_name):
     result = subprocess.run(
         [
             str(runner),
-            "--model", str(dxnn),
-            "--input-size", str(input_data_size(model_name)),
-            "--input-shape", shape,
-            "--runs", str(_TEST_RUNS),
-            "--warmup", str(_TEST_WARMUP),
+            "--model",
+            str(dxnn),
+            "--input-size",
+            str(input_data_size(model_name)),
+            "--input-shape",
+            shape,
+            "--runs",
+            str(_TEST_RUNS),
+            "--warmup",
+            str(_TEST_WARMUP),
             "--csv",
         ],
         capture_output=True,
@@ -139,7 +143,7 @@ def test_inference_metrics_valid(runner, model_name):
         timeout=120,
     )
     if result.returncode != 0:
-        pytest.skip(f"inference_runner failed — see test_inference_succeeds for details")
+        pytest.skip("inference_runner failed — see test_inference_succeeds for details")
 
     parts = result.stdout.strip().split(",")
     # CSV: model,runs,avg_ms,p50_ms,p95_ms,min_ms,max_ms,throughput_fps
