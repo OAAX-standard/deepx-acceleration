@@ -1,0 +1,352 @@
+name: Build
+
+permissions:
+  contents: none
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-toolchain:
+    # Self-hosted runner: skip PRs from forks.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 10
+    runs-on: hetzner
+    container:
+      image: ubuntu:22.04
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install s3cmd
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y s3cmd docker.io
+
+      - name: Build conversion toolchain image
+        run: bash conversion-toolchain/build-toolchain.sh
+
+      - name: Configure s3cmd
+        run: |
+          cat > ~/.s3cfg <<EOF
+          [default]
+          access_key = ${{ secrets.S3_ACCESS_KEY }}
+          secret_key = ${{ secrets.S3_SECRET_KEY }}
+          bucket_location = us-east-1
+          host_base = ${{ secrets.S3_ENDPOINT_URL }}
+          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
+          use_https = True
+          EOF
+
+      - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if [ -f VERSION ]; then
+              version=$(cat VERSION)
+            else
+              exit 1
+            fi
+          else
+            version="$HEAD_REF"
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Upload Docker image to S3
+        run: |
+          s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/latest/DEEPX/oaax-deepx-toolchain.tar"
+          fi
+
+  unit-tests:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Runtime unit tests (mock DX-RT, no hardware needed)
+        run: |
+          cmake -S runtime-library/test -B build-unit-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-unit-tests -j"$(nproc)"
+          (cd build-unit-tests && ./test_runtime)
+
+      - name: Runtime unit tests under ASan + UBSan
+        run: |
+          cmake -S runtime-library/test -B build-unit-tests-san -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build build-unit-tests-san -j"$(nproc)"
+          (cd build-unit-tests-san && ./test_runtime)
+
+      - name: Python unit tests
+        run: |
+          pip install pytest
+          pytest tests/test_models.py
+
+  build-runtime-ubuntu:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ubuntu_version: ["20.04", "22.04", "24.04"]
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+
+    name: Build runtime for ${{ matrix.arch }}-ubuntu-${{ matrix.ubuntu_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install s3cmd and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y s3cmd
+          pip install requests beautifulsoup4
+
+      - name: Download DX RT
+        run: |
+          cd runtime-library
+          dxrt_version=$(cat ./dxrt_version.txt)
+          wget https://github.com/DEEPX-AI/dx_rt/archive/refs/tags/v${dxrt_version}.zip
+          unzip v*.zip
+          rm v*.zip
+          mv dx_rt-* dx_rt
+
+      - name: Compile runtime
+        run: |
+          cd runtime-library
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }} --cross-aarch64
+          else
+            ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }}
+          fi
+
+      - name: Configure s3cmd
+        run: |
+          cat > ~/.s3cfg <<EOF
+          [default]
+          access_key = ${{ secrets.S3_ACCESS_KEY }}
+          secret_key = ${{ secrets.S3_SECRET_KEY }}
+          bucket_location = us-east-1
+          host_base = ${{ secrets.S3_ENDPOINT_URL }}
+          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
+          use_https = True
+          EOF
+
+      - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if [ -f VERSION ]; then
+              version=$(cat VERSION)
+            else
+              exit 1
+            fi
+          else
+            version="$HEAD_REF"
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Upload runtimes to S3
+        run: |
+          library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
+          s3cmd put "$library_file" "s3://oaax/runtimes/${version}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            s3cmd put "$library_file" "s3://oaax/runtimes/latest/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
+          fi
+
+  build-runtime-windows:
+    timeout-minutes: 10
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: ["x86_64"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download DX RT
+        shell: pwsh
+        run: |
+          cd runtime-library
+          $dxrt_windows_commit = Get-Content ./dxrt_windows_commit.txt
+          git clone https://github.com/DEEPX-AI/dx_rt_windows.git
+          cd dx_rt_windows
+          git checkout $dxrt_windows_commit
+          cd ..
+
+      - name: Compile runtime
+        shell: pwsh
+        run: |
+          cd runtime-library
+          $m1Dir = Join-Path "dx_rt_windows" "m1"
+          $dxrtRoot = $null
+          foreach ($v in (Get-ChildItem -Path $m1Dir -Directory)) {
+            $candidate = Join-Path $v.FullName "dx_rt"
+            if ((Test-Path (Join-Path $candidate "include")) -and (Test-Path (Join-Path $candidate "lib"))) {
+              $dxrtRoot = $candidate
+              break
+            }
+          }
+          if (-not $dxrtRoot) { throw "Could not find dx_rt SDK (include/ and lib/) under dx_rt_windows/m1/" }
+          ./build-windows.ps1 -DxrtRoot $dxrtRoot -Configuration Release
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
+            if (Test-Path VERSION) {
+              $version = Get-Content VERSION
+            } else {
+              throw "VERSION file missing"
+            }
+          } else {
+            $version = $env:HEAD_REF
+          }
+          echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload runtimes to Custom S3-Compatible Bucket
+        shell: pwsh
+        run: |
+          $version = $env:version
+          $artifactDir = "runtime-library\artifacts\x86_64-windows"
+          $artifactPath = (Get-ChildItem -Path $artifactDir -File | Where-Object { $_.Name -like "*.tar.gz" } | Select-Object -First 1).FullName
+          if (-Not $artifactPath) {
+            throw "No .tar.gz artifact file found in directory: $artifactDir"
+          }
+          $targetKey = "runtimes/$version/DEEPX/x86_64/Windows/"
+          $latestTargetKey = "runtimes/latest/DEEPX/x86_64/Windows/"
+
+          $s5cmdUrl = "https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Windows-64bit.zip"
+          $s5cmdZip = "$env:USERPROFILE\s5cmd.zip"
+          $s5cmdPath = "$env:USERPROFILE\s5cmd"
+          Invoke-WebRequest -Uri $s5cmdUrl -OutFile $s5cmdZip
+          Expand-Archive -Path $s5cmdZip -DestinationPath $s5cmdPath -Force
+          Remove-Item -Path $s5cmdZip
+
+          $env:PATH += ";$s5cmdPath"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::User)
+
+          Write-Host "Uploading $artifactPath to s3://oaax/$targetKey"
+          $env:AWS_ACCESS_KEY_ID = "${{ secrets.S3_ACCESS_KEY }}"
+          $env:AWS_SECRET_ACCESS_KEY = "${{ secrets.S3_SECRET_KEY }}"
+          s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$targetKey"
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
+            s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$latestTargetKey"
+          }
+
+  # Opt-in: set repository variable RUN_INTEGRATION_TESTS=true to enable stage 1 (conversion).
+  # Stage 2 additionally needs DeepX hardware on the runner: set RUN_STAGE2=true only then.
+  integration-tests:
+    if: vars.RUN_INTEGRATION_TESTS == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 30
+    runs-on: hetzner
+    needs: [build-toolchain, build-runtime-ubuntu]
+    container:
+      image: ubuntu:22.04
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    permissions:
+      actions: write
+
+    steps:
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y git docker.io python3 python3-pip s3cmd wget cmake g++
+          pip3 install uv
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python environment
+        run: uv sync -q
+
+      - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            version=$(cat VERSION)
+          else
+            version="$HEAD_REF"
+          fi
+          echo "version=$version" >> $GITHUB_ENV
+
+      - name: Download runtime library
+        run: |
+          dxrt_version="v$(cat runtime-library/dxrt_version.txt)"
+          mkdir -p runtime-library/artifacts/x86_64-ubuntu22.04
+          wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${version}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
+          tar xzf /tmp/library.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
+
+      - name: Load toolchain Docker image
+        run: |
+          wget -q "https://oaax.nbg1.your-objectstorage.com/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar" -O /tmp/toolchain.tar  # check-secrets-ignore: public artifact storage
+          docker load -i /tmp/toolchain.tar
+          rm /tmp/toolchain.tar
+
+      - name: Verify Docker and toolchain image
+        run: |
+          docker info
+          docker images oaax-deepx-toolchain:latest
+
+      - name: Stage 1 — convert models and run toolchain tests
+        env:
+          DEEPX_TOOLCHAIN_IMAGE: oaax-deepx-toolchain:latest
+        run: uv run python tests/stage1.py
+
+      - name: Upload compiled models
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-models
+          path: tests/compiled_models/
+          retention-days: 1
+
+      - name: Stage 2 — build inference runner and run inference tests
+        if: vars.RUN_STAGE2 == 'true'
+        run: uv run python tests/stage2.py --csv tests/stage2_results.csv
+
+      - name: Upload stage2 results
+        if: always() && vars.RUN_STAGE2 == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage2-results
+          path: tests/stage2_results.csv
+          if-no-files-found: ignore
+
+      - name: Upload conversion logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversion-logs
+          path: tests/compiled_models/**/convert.log
+          if-no-files-found: warn

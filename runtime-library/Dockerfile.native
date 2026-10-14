@@ -56,7 +56,7 @@ RUN apt-get install -y --no-install-recommends \
 COPY dx_rt /dx_rt
 
 # Copy runtime library source
-COPY deps /runtime_library/deps     
+COPY deps /runtime_library/deps
 COPY include /runtime_library/include
 COPY src /runtime_library/src
 COPY CMakeLists.txt /runtime_library/CMakeLists.txt
@@ -96,11 +96,11 @@ RUN echo "===== Starting runtime_library build =====" && \
     cd /build_runtime && \
     # Configure with CMake
     cmake -DCMAKE_BUILD_TYPE=Release \
-          -DOAAX_RUNTIME_VERSION=${OAAX_RUNTIME_VERSION} \
+          -DOAAX_RUNTIME_VERSION="${OAAX_RUNTIME_VERSION}" \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           /runtime_library && \
     # Build and install
-    make -j$(nproc) && \
+    make -j"$(nproc)" && \
     make install && \
     ldconfig && \
     # Verify build

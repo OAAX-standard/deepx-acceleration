@@ -1,5 +1,8 @@
 name: Delete test runtimes and toolchain on PR close
 
+permissions:
+  contents: none
+
 on:
   pull_request:
     types:
@@ -10,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install s3cmd and Python dependencies
+      - name: Install s3cmd
         run: |
           sudo apt-get update
           sudo apt-get install -y s3cmd
@@ -28,13 +31,18 @@ jobs:
           EOF
 
       - name: Determine version
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          version=${{ github.head_ref }}
-          echo "version=${version}" >> $GITHUB_ENV
-          echo "Environment variable: ${{ env.version }}"
-
+          # Never touch the release folders: a branch named "latest" or "2.0.0"
+          # would otherwise delete published artifacts.
+          if [[ "$HEAD_REF" =~ ^(latest|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Refusing to delete artifacts for reserved version name '$HEAD_REF'" >&2
+            exit 1
+          fi
+          echo "version=${HEAD_REF}" >> "$GITHUB_ENV"
 
       - name: Delete runtimes and toolchain folders from S3
         run: |
-            s3cmd del --recursive "s3://oaax/runtimes/${{ env.version }}/DEEPX/" || echo "Warning: No runtime-library found for version ${{ env.version }}"
-            s3cmd del --recursive "s3://oaax/conversion-toolchain/${{ env.version }}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${{ env.version }}"
+          s3cmd del --recursive "s3://oaax/runtimes/${version}/DEEPX/" || echo "Warning: No runtime-library found for version ${version}"
+          s3cmd del --recursive "s3://oaax/conversion-toolchain/${version}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${version}"

@@ -18,7 +18,7 @@ if (-not $RuntimeVersion) {
 }
 
 if (-not $RuntimeVersion) {
-    Write-Error "RuntimeVersion is required. Pass -RuntimeVersion or ensure dxrt_version.txt exists."
+    Write-Error "RuntimeVersion is required. Pass -RuntimeVersion or ensure ..\VERSION exists."
     exit 1
 }
 

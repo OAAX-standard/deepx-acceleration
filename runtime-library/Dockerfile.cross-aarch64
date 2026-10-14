@@ -60,7 +60,7 @@ RUN apt-get install -y --no-install-recommends \
 COPY dx_rt /dx_rt
 
 # Copy runtime library source
-COPY deps /runtime_library/deps     
+COPY deps /runtime_library/deps
 COPY include /runtime_library/include
 COPY src /runtime_library/src
 COPY CMakeLists.txt /runtime_library/CMakeLists.txt
@@ -100,7 +100,7 @@ RUN echo "===== Starting runtime_library cross-compilation =====" && \
     cd /build_runtime && \
     # Configure with CMake for cross-compilation
     cmake -DCMAKE_BUILD_TYPE=Release \
-          -DOAAX_RUNTIME_VERSION=${OAAX_RUNTIME_VERSION} \
+          -DOAAX_RUNTIME_VERSION="${OAAX_RUNTIME_VERSION}" \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           -DCMAKE_SYSTEM_NAME=Linux \
           -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
@@ -114,7 +114,7 @@ RUN echo "===== Starting runtime_library cross-compilation =====" && \
           -DCMAKE_C_FLAGS="-I/usr/local/include" \
           /runtime_library && \
     # Build and install
-    make -j$(nproc) && \
+    make -j"$(nproc)" && \
     make install && \
     # Verify build
     if [ -f /usr/local/lib/libRuntimeLibrary.so ]; then \

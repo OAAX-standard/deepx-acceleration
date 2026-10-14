@@ -1,0 +1,37 @@
+[project]
+name = "deepx-acceleration-tests"
+version = "1.0.0"
+description = "Test suite for the OAAX DeepX Acceleration runtime and conversion toolchain"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=7.0",
+    # used by tests/models.py:preprocess_image
+    "numpy",
+    "opencv-python-headless",
+]
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+# ── Ruff (lint + format) ──────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names, …)
+    "I",   # isort (import ordering)
+    "UP",  # pyupgrade (modernise syntax)
+    "B",   # flake8-bugbear (common bug patterns)
+]
+ignore = [
+    "E501",  # line-too-long — enforced by ruff-format instead
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401", "F811"]  # unused imports / redefinitions common in test files
