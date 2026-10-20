@@ -75,7 +75,7 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 ## Limitations
 
 - **Linux builds**: Currently supported for Ubuntu-based targets (20.04, 22.04, and 24.04).
-- **Windows builds**: Supported for x86_64 using Visual Studio 2022 and the DX-RT Windows SDK.
+- **Windows builds**: Not supported yet; the CI job is disabled. The build script (`runtime-library/build-windows.ps1`, Visual Studio 2022 + DX-RT Windows SDK) is kept for when support lands.
 
 ---
 

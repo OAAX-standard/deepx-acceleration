@@ -175,6 +175,9 @@ jobs:
           fi
 
   build-runtime-windows:
+    # Disabled: Windows is not supported yet (the DX-RT Windows SDK repo is not
+    # publicly cloneable from CI). Remove this line to re-enable.
+    if: false
     timeout-minutes: 10
     runs-on: windows-latest
     strategy:
