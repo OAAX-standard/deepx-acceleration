@@ -6,7 +6,7 @@ for project-wide conventions (bug reports, commit messages and DCO sign-off, cod
 
 ## How to contribute
 
-1. **Open an issue** to discuss the bug or feature before writing code.
+1. **Open an issue** for a bug or feature, before writing code for anything beyond a small fix.
 2. **Fork the repository** and create a branch from `main`.
 3. **Make your changes**, keeping each PR focused on one thing.
 4. **Run the tests** locally (see below) to confirm nothing is broken.
@@ -16,7 +16,7 @@ for project-wide conventions (bug reports, commit messages and DCO sign-off, cod
 
 The conversion toolchain (Docker) and the runtime library (C++) build independently with the scripts in their
 folders; see the [toolchain guide](conversion-toolchain/README.md) and the [runtime guide](runtime-library/README.md).
-DX-RT and DX-COM are proprietary DEEPX software and must be installed separately where those guides ask for them.
+DX-RT is proprietary DEEPX software and must be installed separately where the runtime guide asks for it; the toolchain build downloads DX-COM from `sdk.deepx.ai`, so it needs internet access.
 
 ## Running the tests
 
@@ -30,3 +30,5 @@ DX-RT and DX-COM are proprietary DEEPX software and must be installed separately
 pip install pre-commit
 pre-commit run --all-files   # ruff, clang-format, shellcheck, hadolint: the same checks CI runs
 ```
+
+Jobs that upload artifacts need repository secrets and can fail on a PR from a fork; that is not caused by your change.
