@@ -79,6 +79,12 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 
 ---
 
+## Contributing
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off (`git commit -s`).
+
+---
+
 ## License
 
 This project is licensed under the **Apache License 2.0**.  
