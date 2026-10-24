@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing! Before you start, please read the
 [OAAX general contributing guide](https://github.com/OAAX-standard/OAAX/blob/main/CONTRIBUTING.md)
-for project-wide conventions (bug reports, commit messages and DCO sign-off, code style).
+for project-wide conventions (bug reports, commit messages and DCO sign-off).
 
 ## How to contribute
 
@@ -20,7 +20,7 @@ DX-RT is proprietary DEEPX software and must be installed separately where the r
 
 ## Running the tests
 
-- No hardware needed (these run in CI): `pytest tests/test_models.py` and the mock DX-RT runtime tests described in the
+- No hardware needed (these run in CI; `pip install pytest` first): `pytest tests/test_models.py` and the mock DX-RT runtime tests described in the
   [runtime guide](runtime-library/README.md#unit-tests).
 - Conversion and inference tests need Docker and, for inference, DEEPX hardware: see the [test suite guide](tests/README.md).
 
