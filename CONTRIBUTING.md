@@ -31,4 +31,4 @@ pip install pre-commit
 pre-commit run --all-files   # ruff, clang-format, shellcheck, hadolint: the same checks CI runs
 ```
 
-Jobs that upload artifacts need repository secrets and can fail on a PR from a fork; that is not caused by your change.
+The self-hosted build jobs are skipped on a PR from a fork, so its CI does not build or upload anything; a maintainer's run covers it. Releases are uploaded to the bucket only when a maintainer pushes a `vX.Y.Z` tag, never on a merge to `main`.

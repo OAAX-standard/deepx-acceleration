@@ -40,4 +40,9 @@ their own licenses:
 
 - **DX-RT** (DEEPX runtime, linked dynamically) and **DX-COM** (DEEPX compiler,
   pip-installed into the toolchain image from `sdk.deepx.ai`) — proprietary DEEPX software.
-- DEEPX Model Zoo ONNX models downloaded by the test suite — see the license of each model.
+- DEEPX Model Zoo ONNX models downloaded by the test suite — see the license of each model. The YOLO models
+  are Ultralytics-derived (AGPL-3.0); they are test-time downloads only and are not committed or distributed.
+
+Note: the published conversion-toolchain image (`oaax-deepx-toolchain.tar`) does contain DX-COM, its Python
+dependencies and the `python:3.11-slim` base image (Debian and Python packages, each under its own license).
+This repository ships none of them in source form.
