@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main
@@ -15,7 +17,7 @@ jobs:
   build-toolchain:
     # Self-hosted runner: skip PRs from forks.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 10
+    timeout-minutes: 30  # includes handing the ~6 GB image to GitHub as an artifact
     runs-on: hetzner
     container:
       image: ubuntu:22.04
@@ -27,48 +29,24 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install s3cmd
+      - name: Install docker
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y s3cmd docker.io
+          apt-get install -y docker.io
 
       - name: Build conversion toolchain image
         run: bash conversion-toolchain/build-toolchain.sh
 
-      - name: Configure s3cmd
-        run: |
-          cat > ~/.s3cfg <<EOF
-          [default]
-          access_key = ${{ secrets.S3_ACCESS_KEY }}
-          secret_key = ${{ secrets.S3_SECRET_KEY }}
-          bucket_location = us-east-1
-          host_base = ${{ secrets.S3_ENDPOINT_URL }}
-          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
-          use_https = True
-          EOF
-
-      - name: Determine version
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            if [ -f VERSION ]; then
-              version=$(cat VERSION)
-            else
-              exit 1
-            fi
-          else
-            version="$HEAD_REF"
-          fi
-          echo "version=$version" >> $GITHUB_ENV
-
-      - name: Upload Docker image to S3
-        run: |
-          s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            s3cmd put "conversion-toolchain/artifacts/oaax-deepx-toolchain.tar" "s3://oaax/conversion-toolchain/latest/DEEPX/oaax-deepx-toolchain.tar"
-          fi
+      # Docker layers are mostly incompressible binaries: a low level keeps the upload fast.
+      - name: Keep the toolchain image for the tests and the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: toolchain-image
+          path: conversion-toolchain/artifacts/oaax-deepx-toolchain.tar
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
 
   unit-tests:
     timeout-minutes: 10
@@ -115,11 +93,8 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install s3cmd and Python dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y s3cmd
-          pip install requests beautifulsoup4
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4
 
       - name: Download DX RT
         run: |
@@ -139,40 +114,13 @@ jobs:
             ./build-runtimes.sh --ubuntu_version ${{ matrix.ubuntu_version }}
           fi
 
-      - name: Configure s3cmd
-        run: |
-          cat > ~/.s3cfg <<EOF
-          [default]
-          access_key = ${{ secrets.S3_ACCESS_KEY }}
-          secret_key = ${{ secrets.S3_SECRET_KEY }}
-          bucket_location = us-east-1
-          host_base = ${{ secrets.S3_ENDPOINT_URL }}
-          host_bucket = %(bucket)s.${{ secrets.S3_ENDPOINT_URL }}
-          use_https = True
-          EOF
-
-      - name: Determine version
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            if [ -f VERSION ]; then
-              version=$(cat VERSION)
-            else
-              exit 1
-            fi
-          else
-            version="$HEAD_REF"
-          fi
-          echo "version=$version" >> $GITHUB_ENV
-
-      - name: Upload runtimes to S3
-        run: |
-          library_file=$(find runtime-library/artifacts -name "*.tar.gz" | head -n 1)
-          s3cmd put "$library_file" "s3://oaax/runtimes/${version}/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            s3cmd put "$library_file" "s3://oaax/runtimes/latest/DEEPX/${{ matrix.arch }}/Ubuntu/${{ matrix.ubuntu_version }}/"
-          fi
+      - name: Keep the runtime for the tests and the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: runtime-${{ matrix.arch }}-ubuntu${{ matrix.ubuntu_version }}
+          path: runtime-library/artifacts/${{ matrix.arch }}-ubuntu${{ matrix.ubuntu_version }}/library-*.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
   build-runtime-windows:
     # Disabled: Windows is not supported yet (the DX-RT Windows SDK repo is not
@@ -217,52 +165,14 @@ jobs:
           if (-not $dxrtRoot) { throw "Could not find dx_rt SDK (include/ and lib/) under dx_rt_windows/m1/" }
           ./build-windows.ps1 -DxrtRoot $dxrtRoot -Configuration Release
 
-      - name: Determine version
-        id: version
-        shell: pwsh
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          if ("${{ github.ref }}" -eq "refs/heads/main") {
-            if (Test-Path VERSION) {
-              $version = Get-Content VERSION
-            } else {
-              throw "VERSION file missing"
-            }
-          } else {
-            $version = $env:HEAD_REF
-          }
-          echo "version=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Upload runtimes to Custom S3-Compatible Bucket
-        shell: pwsh
-        run: |
-          $version = $env:version
-          $artifactDir = "runtime-library\artifacts\x86_64-windows"
-          $artifactPath = (Get-ChildItem -Path $artifactDir -File | Where-Object { $_.Name -like "*.tar.gz" } | Select-Object -First 1).FullName
-          if (-Not $artifactPath) {
-            throw "No .tar.gz artifact file found in directory: $artifactDir"
-          }
-          $targetKey = "runtimes/$version/DEEPX/x86_64/Windows/"
-          $latestTargetKey = "runtimes/latest/DEEPX/x86_64/Windows/"
-
-          $s5cmdUrl = "https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Windows-64bit.zip"
-          $s5cmdZip = "$env:USERPROFILE\s5cmd.zip"
-          $s5cmdPath = "$env:USERPROFILE\s5cmd"
-          Invoke-WebRequest -Uri $s5cmdUrl -OutFile $s5cmdZip
-          Expand-Archive -Path $s5cmdZip -DestinationPath $s5cmdPath -Force
-          Remove-Item -Path $s5cmdZip
-
-          $env:PATH += ";$s5cmdPath"
-          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::User)
-
-          Write-Host "Uploading $artifactPath to s3://oaax/$targetKey"
-          $env:AWS_ACCESS_KEY_ID = "${{ secrets.S3_ACCESS_KEY }}"
-          $env:AWS_SECRET_ACCESS_KEY = "${{ secrets.S3_SECRET_KEY }}"
-          s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$targetKey"
-          if ("${{ github.ref }}" -eq "refs/heads/main") {
-            s5cmd --endpoint-url "https://${{ secrets.S3_ENDPOINT_URL }}" cp "$artifactPath" "s3://oaax/$latestTargetKey"
-          }
+      # The publish job uploads it (scripts/publish-artifacts.sh picks this artifact up when it exists).
+      - name: Keep the runtime for the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: runtime-x86_64-windows
+          path: runtime-library\artifacts\x86_64-windows\library-*.tar.gz
+          retention-days: 1
+          if-no-files-found: error
 
   # Opt-in: set repository variable RUN_INTEGRATION_TESTS=true to enable stage 1 (conversion).
   # Stage 2 additionally needs DeepX hardware on the runner: set RUN_STAGE2=true only then.
@@ -282,7 +192,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y git docker.io python3 python3-pip s3cmd wget cmake g++
+          apt-get install -y git docker.io python3 python3-pip cmake g++
           pip3 install uv
 
       - name: Checkout
@@ -293,29 +203,26 @@ jobs:
       - name: Set up Python environment
         run: uv sync -q
 
-      - name: Determine version
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            version=$(cat VERSION)
-          else
-            version="$HEAD_REF"
-          fi
-          echo "version=$version" >> $GITHUB_ENV
+      # The bytes built by this run, not whatever the bucket holds under the version or branch name.
+      - name: Download the runtime library
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: runtime-x86_64-ubuntu22.04
+          path: runtime-library/artifacts/x86_64-ubuntu22.04
 
-      - name: Download runtime library
-        run: |
-          dxrt_version="v$(cat runtime-library/dxrt_version.txt)"
-          mkdir -p runtime-library/artifacts/x86_64-ubuntu22.04
-          wget -q "https://oaax.nbg1.your-objectstorage.com/runtimes/${version}/DEEPX/x86_64/Ubuntu/22.04/library-dxrt-${dxrt_version}.tar.gz" -O /tmp/library.tar.gz  # check-secrets-ignore: public artifact storage
-          tar xzf /tmp/library.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
+      - name: Unpack the runtime library
+        run: tar xzf runtime-library/artifacts/x86_64-ubuntu22.04/library-*.tar.gz -C runtime-library/artifacts/x86_64-ubuntu22.04/
+
+      - name: Download the toolchain image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: toolchain-image
+          path: /tmp/toolchain
 
       - name: Load toolchain Docker image
         run: |
-          wget -q "https://oaax.nbg1.your-objectstorage.com/conversion-toolchain/${version}/DEEPX/oaax-deepx-toolchain.tar" -O /tmp/toolchain.tar  # check-secrets-ignore: public artifact storage
-          docker load -i /tmp/toolchain.tar
-          rm /tmp/toolchain.tar
+          docker load -i /tmp/toolchain/oaax-deepx-toolchain.tar
+          rm -r /tmp/toolchain
 
       - name: Verify Docker and toolchain image
         run: |
@@ -353,3 +260,62 @@ jobs:
           name: conversion-logs
           path: tests/compiled_models/**/convert.log
           if-no-files-found: warn
+
+  # Runs after every build and test passed and uploads the bytes that were tested:
+  #   v* tag               -> <VERSION>/ (write once) and latest/, the release
+  #   pull request         -> <branch>/ (overwritten on every run, removed when the PR closes), for testing
+  #   anything else (a push to main), or a PR without secrets (fork, Dependabot) -> dry run: files checked, keys printed
+  publish:
+    name: Publish to the OAAX bucket
+    timeout-minutes: 45
+    runs-on: ubuntu-22.04
+    needs: [unit-tests, build-toolchain, build-runtime-ubuntu, build-runtime-windows, integration-tests]
+    # integration-tests (opt-in) and build-runtime-windows (disabled) are skipped, which would skip this job by default.
+    # build-toolchain is skipped for PRs from forks: nothing to publish there.
+    if: >-
+      ${{ always()
+      && needs.unit-tests.result == 'success'
+      && needs.build-toolchain.result == 'success'
+      && needs.build-runtime-ubuntu.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.build-runtime-windows.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.integration-tests.result) }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0  # the tag check below needs main's history
+
+      - name: Tag must match VERSION and be on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [ "${TAG#v}" = "$(cat VERSION)" ] || { echo "tag $TAG does not match VERSION $(cat VERSION)"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main, tag a commit of main"; exit 1; }
+
+      - name: Download the build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+          pattern: "{runtime-*,toolchain-image}"  # not the test logs
+
+      - name: Install s3cmd
+        run: sudo apt-get update -y && sudo apt-get install -y s3cmd
+
+      - name: Upload to S3
+        env:
+          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+        # The branch name reaches the script only through the environment (GITHUB_HEAD_REF), never through ${{ }}.
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            mode=release name=$(cat VERSION)
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ] && [ -n "$S3_ACCESS_KEY" ]; then
+            mode=branch name=$GITHUB_HEAD_REF
+          else
+            mode=dry name=$(cat VERSION)
+          fi
+          bash scripts/publish-artifacts.sh "$mode" "$name" artifacts

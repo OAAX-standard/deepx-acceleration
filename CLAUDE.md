@@ -98,12 +98,20 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `build.yml` | push/PR to `main` | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24; the Windows x86_64 job is disabled with `if: false` until Windows is supported); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner) |
+| `build.yml` | push/PR to `main`, `v*` tag | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24; the Windows x86_64 job is disabled with `if: false` until Windows is supported); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner); then `publish` (see below) |
 | `lint.yml` | push/PR to `main` | Runs pre-commit hooks (ruff, clang-format, shellcheck, hadolint) |
-| `delete-temporary-artifacts.yml` | PR closed | Cleans up branch-scoped S3 artifacts |
+| `delete-temporary-artifacts.yml` | PR closed | Removes the PR's `<branch>/` artifacts from S3 (never a release-looking name) |
 
-The self-hosted `hetzner` jobs are skipped for PRs from forks. Artifacts are uploaded to an S3-compatible bucket. On `main` the version comes from the `VERSION` file; on feature branches the branch name is used as the version.
+The self-hosted `hetzner` jobs are skipped for PRs from forks. Build jobs pass their output to the tests and to `publish` as GitHub artifacts (the toolchain image is ~6 GB). `publish` runs only after the builds and tests passed and uploads those bytes to the S3-compatible bucket with `scripts/publish-artifacts.sh`:
+
+| Event | Mode | Writes |
+|---|---|---|
+| `v*` tag (must equal `VERSION`, commit on `main`) | release | `<VERSION>/`, **write once** (refuses if any key exists), plus `latest/` |
+| pull request with secrets | branch | `<branch>/`, overwritten on each run, never `latest/`; names that look like a release (`latest`, leading digit, `v<digit>`) are refused |
+| push to `main` | dry run | nothing (files checked, keys printed) |
+
+A push to `main` never changes the bucket.
 
 ## Version Management
 
-The project version lives in `/VERSION`. Update this file when cutting a release. The CI reads it to determine the S3 upload path and artifact naming.
+The project version lives in `/VERSION`. Release: bump `VERSION` on `main`, then push the tag `vX.Y.Z` (it must match `VERSION`) on that commit. The CI reads `VERSION` for the release upload path; a published version is never overwritten, so bump it for every new release.

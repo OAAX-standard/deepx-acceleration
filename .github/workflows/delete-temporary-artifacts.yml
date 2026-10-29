@@ -34,15 +34,16 @@ jobs:
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          # Never touch the release folders: a branch named "latest" or "2.0.0"
-          # would otherwise delete published artifacts.
-          if [[ "$HEAD_REF" =~ ^(latest|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "Refusing to delete artifacts for reserved version name '$HEAD_REF'" >&2
-            exit 1
+          # Never touch the release folders: a branch named "latest", "2.0.0" or "v2.0.0"
+          # would otherwise delete published artifacts (see scripts/publish-artifacts.sh).
+          if [[ "$HEAD_REF" =~ ^(latest|v?[0-9]) ]]; then
+            echo "Not deleting '$HEAD_REF': looks like a release"
+            exit 0
           fi
           echo "version=${HEAD_REF}" >> "$GITHUB_ENV"
 
       - name: Delete runtimes and toolchain folders from S3
+        if: env.version != ''  # empty when the branch name looks like a release
         run: |
           s3cmd del --recursive "s3://oaax/runtimes/${version}/DEEPX/" || echo "Warning: No runtime-library found for version ${version}"
           s3cmd del --recursive "s3://oaax/conversion-toolchain/${version}/DEEPX/" || echo "Warning: No conversion-toolchain found for version ${version}"
