@@ -45,6 +45,21 @@ inline std::atomic<int> &run_async_failures() {
     return v;
 }
 
+// Test knob: this many of the next RunAsync jobs fail on the device, which
+// DX-RT reports by delivering the job to the callback with zero tensors.
+inline std::atomic<int> &device_failures() {
+    static std::atomic<int> v{0};
+    return v;
+}
+
+// Atomically takes one unit from a positive knob; returns false if it is zero.
+inline bool take_one(std::atomic<int> &knob) {
+    int left = knob.load();
+    while (left > 0 && !knob.compare_exchange_weak(left, left - 1)) {
+    }
+    return left > 0;
+}
+
 // Test knob: the first int of every RunAsync input, in call order.
 struct RunAsyncLog {
     std::mutex mtx;
@@ -115,10 +130,8 @@ public:
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
     int RunAsync(void *input, void *userArg, void *) {
-        int failures = run_async_failures().load();
-        while (failures > 0 && !run_async_failures().compare_exchange_weak(failures, failures - 1)) {
-        }
-        if (failures > 0) throw std::runtime_error("mock: RunAsync failed");
+        if (take_one(run_async_failures())) throw std::runtime_error("mock: RunAsync failed");
+        const bool device_failure = take_one(device_failures());
         {
             int first = 0;
             std::memcpy(&first, input, sizeof(first));
@@ -127,9 +140,10 @@ public:
         }
         const int job_id = next_job_id_.fetch_add(1);
         std::lock_guard<std::mutex> lk(mtx_);
-        threads_.emplace_back([this, job_id, userArg]() {
+        threads_.emplace_back([this, job_id, userArg, device_failure]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5 + (job_id % 11)));
-            TensorPtrs outputs{std::make_shared<Tensor>(GetOutputSize(), fill_)};
+            TensorPtrs outputs;
+            if (!device_failure) outputs.push_back(std::make_shared<Tensor>(GetOutputSize(), fill_));
             if (callback_) callback_(outputs, userArg);
         });
         return job_id;

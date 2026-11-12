@@ -1137,6 +1137,31 @@ static void test_pending_fifo_order() {
     printf("  PASSED\n");
 }
 
+// A job that fails on the device (DX-RT delivers it with zero tensors) is answered with
+// INFERENCE_ERROR, and its output buffer is reused.
+static void test_device_failure_answered() {
+    printf("=== test_device_failure_answered ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    dxrt::device_failures().store(1);
+    assert(runtime_enqueue_input(0, make_input(7)) == RUNTIME_STATUS_SUCCESS);
+    int mid = -1;
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(&mid, &output, 2000) == RUNTIME_STATUS_INFERENCE_ERROR);
+    assert(mid == 0 && output == nullptr);
+    assert(strstr(runtime_get_error(), "model[0]: request 7 failed in DX-RT") != nullptr);
+    assert(strstr(runtime_get_info(), "\"requests_in_flight\": 0") != nullptr);
+
+    first_output_byte_per_model(1);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1186,6 +1211,7 @@ int main() {
     test_rejected_submission_answered();
     test_last_error_is_per_thread();
     test_pending_fifo_order();
+    test_device_failure_answered();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

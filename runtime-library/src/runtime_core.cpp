@@ -44,7 +44,9 @@
 //     already accepted, so it is answered instead: it keeps its buffer and
 //     goes to the output queue, and runtime_retrieve_output returns
 //     INFERENCE_ERROR with its model id and the request id in the error text.
-//     Either way each accepted request is answered exactly once.
+//     A request that fails on the device (DX-RT delivers it to the callback
+//     without its output tensors) is answered the same way.  Either way each
+//     accepted request is answered exactly once.
 //   - The last error is per thread (like errno), so a caller reads the error
 //     of its own call even while other threads fail.  runtime_init and
 //     runtime_cleanup invalidate every thread's message.
@@ -97,7 +99,7 @@ struct JobData {
     Tensors *input_tensors{nullptr};  // caller's input; owned here, freed in completion callback
     void *outputs_ptr{nullptr};       // set when the job is submitted
     dxrt::TensorPtrs dxrt_outputs;
-    bool rejected{false};  // DX-RT rejected the job; `error` says why
+    bool failed{false};  // DX-RT rejected or failed the job; `error` says why
     std::string error;
 };
 
@@ -290,11 +292,6 @@ TensorElementType map_data_type(dxrt::DataType dtype) {
 
 Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const dxrt::TensorPtrs &outputs) {
     const int num = static_cast<int>(outputs.size());
-    if (num == 0 || static_cast<int>(ctx.output_sizes.size()) != num) {
-        spdlog::error("Output tensor count mismatch: dxrt={}, expected={}", num, ctx.output_sizes.size());
-        return nullptr;
-    }
-
     Tensors *t = static_cast<Tensors *>(std::malloc(sizeof(Tensors)));
     if (!t) return nullptr;
     t->id = request_id;
@@ -407,13 +404,13 @@ void finish_in_flight(ModelContext &ctx) {
     }
 }
 
-// Marks the job rejected by DX-RT and logs why; the reason is kept in
-// jd->error for the API call that reports it.
-void reject(JobData *jd, const char *reason) noexcept {
-    jd->rejected = true;
+// Marks the job failed and logs "model[<id>]: request <n> <what><detail>"; the
+// message is kept in jd->error for the API call that reports it.
+void fail_job(JobData *jd, const char *what, const char *detail = "") noexcept {
+    jd->failed = true;
     try {
         jd->error = "model[" + std::to_string(jd->ctx->model_id) + "]: request " + std::to_string(jd->request_id) +
-                    " rejected by DX-RT: " + reason;
+                    " " + what + detail;
         spdlog::error("{}", jd->error);
     } catch (...) {
         // Out of memory even for the message: the status alone must do.
@@ -421,7 +418,7 @@ void reject(JobData *jd, const char *reason) noexcept {
 }
 
 // Submits a job whose output buffer is set and which is already counted in
-// in_flight.  Returns false if DX-RT rejects it (see reject()); the job then
+// in_flight.  Returns false if DX-RT rejects it (see fail_job()); the job then
 // still owns its input and buffer and is still in flight.  Does not touch the
 // caller's last error, so a retrieve that submits a pending job is unaffected.
 bool submit(JobData *jd) noexcept {
@@ -431,9 +428,9 @@ bool submit(JobData *jd) noexcept {
         jd->ctx->engine->RunAsync(jd->input_tensors->tensors[0].data, jd, jd->outputs_ptr);
         return true;
     } catch (const std::exception &e) {
-        reject(jd, e.what());
+        fail_job(jd, "rejected by DX-RT: ", e.what());
     } catch (...) {
-        reject(jd, "non-standard exception");
+        fail_job(jd, "rejected by DX-RT: ", "non-standard exception");
     }
     return false;
 }
@@ -514,7 +511,12 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
     ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
         auto *jd = static_cast<JobData *>(userArg);
         if (jd) {
-            jd->dxrt_outputs = outputs;
+            // DX-RT delivers a job that failed on the device with zero tensors.
+            if (outputs.size() == ctx_raw->output_sizes.size()) {
+                jd->dxrt_outputs = outputs;
+            } else {
+                fail_job(jd, "failed in DX-RT");
+            }
             // Inference is complete, so DX-RT's asynchronous input encoding
             // has already read the caller's input.  Release it now (zero-copy
             // path: nothing was copied at enqueue time).
@@ -758,8 +760,8 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     const std::unique_ptr<JobData> job(jd);
     if (model_id) *model_id = job->ctx->model_id;
     Tensors *result = nullptr;
-    if (job->rejected) {
-        deep_free_tensors(job->input_tensors);  // never reached DX-RT
+    if (job->failed) {
+        deep_free_tensors(job->input_tensors);  // still set if it never reached DX-RT
     } else {
         result = build_output_tensors(*job->ctx, job->request_id, job->dxrt_outputs);
     }
@@ -768,7 +770,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     // input was already freed in the completion callback (zero-copy path).
     release_output(*job->ctx, job->outputs_ptr);
 
-    if (job->rejected) {
+    if (job->failed) {
         set_error(job->error.c_str());
         return RUNTIME_STATUS_INFERENCE_ERROR;
     }
@@ -822,7 +824,7 @@ RuntimeStatus runtime_cleanup(void) {
     {
         JobData *jd = nullptr;
         while (g_output_queue.try_dequeue(jd)) {
-            deep_free_tensors(jd->input_tensors);  // set for a rejected job
+            deep_free_tensors(jd->input_tensors);  // still set if it never reached DX-RT
             jd->ctx->output_pool->release(jd->outputs_ptr);
             delete jd;
         }
