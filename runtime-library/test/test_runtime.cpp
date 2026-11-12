@@ -41,6 +41,9 @@ static Tensors *make_input(int id, size_t data_size = kModelInputBytes) {
     return t;
 }
 
+// Smallest buffer the mock engine accepts: "DXNN" magic, then the byte it fills outputs with.
+static std::vector<unsigned char> make_model_blob(unsigned char fill) { return {'D', 'X', 'N', 'N', fill, 0, 0, 0}; }
+
 static void free_output(Tensors *t) {
     if (!t) return;
     if (t->tensors) {
@@ -434,7 +437,7 @@ static void test_get_error_thread_safe() {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Test 12: Missing model file
 // ---------------------------------------------------------------------------
 
 static void test_model_file_not_found() {
@@ -449,6 +452,100 @@ static void test_model_file_not_found() {
     assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
     printf("  PASSED\n");
 }
+
+// ---------------------------------------------------------------------------
+// Test 13: In-memory model loading (ModelConfig.model_data)
+// ---------------------------------------------------------------------------
+
+static void test_load_from_memory() {
+    printf("=== test_load_from_memory ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob = make_model_blob(0x07);
+    ModelConfig mc{};
+    mc.file_path = nullptr;
+    mc.model_data = blob.data();
+    mc.model_size = blob.size();
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    assert(runtime_enqueue_input(0, make_input(11)) == RUNTIME_STATUS_SUCCESS);
+    int out_model_id = -1;
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(&out_model_id, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+    assert(out_model_id == 0);
+    assert(output->id == 11);
+    assert(((unsigned char *)output->tensors[0].data)[0] == 0x07);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// The runtime copies model_data: the caller may reuse its buffer right after the load.
+static void test_memory_buffer_copied() {
+    printf("=== test_memory_buffer_copied ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob = make_model_blob(0x07);
+    ModelConfig mc{};
+    mc.model_data = blob.data();
+    mc.model_size = blob.size();
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    memset(blob.data(), 0, blob.size());
+
+    assert(runtime_enqueue_input(0, make_input(12)) == RUNTIME_STATUS_SUCCESS);
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+    assert(((unsigned char *)output->tensors[0].data)[0] == 0x07);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_load_requires_source() {
+    printf("=== test_load_requires_source ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc{};
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_INVALID_ARGUMENT);
+
+    std::vector<unsigned char> blob = make_model_blob(0x07);
+    mc.model_data = blob.data();
+    mc.model_size = 0;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_INVALID_ARGUMENT);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_invalid_model_buffer() {
+    printf("=== test_invalid_model_buffer ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    const unsigned char junk[] = {'X', 'X', 'X', 'X', 0x07, 0, 0, 0};
+    ModelConfig mc{};
+    mc.model_data = junk;
+    mc.model_size = sizeof(junk);
+    mc.config = cfg;
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_INVALID_MODEL);
+    assert(runtime_get_error() != nullptr);
+    assert(strstr(runtime_get_error(), "model[0]") != nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 int main() {
     printf("\n====== OAAX 2.0 Runtime Tests ======\n\n");
@@ -471,6 +568,10 @@ int main() {
     test_scalar_output();
     test_get_error_thread_safe();
     test_model_file_not_found();
+    test_load_from_memory();
+    test_memory_buffer_copied();
+    test_load_requires_source();
+    test_invalid_model_buffer();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

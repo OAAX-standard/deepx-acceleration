@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,8 +33,8 @@ inline std::atomic<bool> &scalar_output() {
 
 class Tensor {
 public:
-    explicit Tensor(size_t size) : data_buf_(malloc(size)), size_(size) {
-        if (data_buf_) memset(data_buf_, 0x42, size);  // fill with pattern
+    Tensor(size_t size, uint8_t fill) : data_buf_(malloc(size)), size_(size) {
+        if (data_buf_) memset(data_buf_, fill, size);
     }
     ~Tensor() { free(data_buf_); }
 
@@ -56,6 +57,14 @@ class InferenceEngine {
 public:
     explicit InferenceEngine(const std::string &) {}
 
+    // A valid in-memory model is "DXNN" followed by the byte outputs are filled
+    // with.  The pointer is kept and re-checked on every RunAsync, like an engine
+    // that parses lazily, so a runtime that does not keep its own copy of the
+    // caller's buffer fails once the caller reuses it.
+    InferenceEngine(const uint8_t *data, size_t size) : model_(data), model_size_(size) {
+        if (!valid_model()) throw std::runtime_error("mock: invalid model buffer");
+    }
+
     // Like the real engine, destruction waits for every in-flight job (and its callback).
     ~InferenceEngine() {
         std::vector<std::thread> threads;
@@ -75,17 +84,23 @@ public:
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
     int RunAsync(void *, void *userArg, void *) {
+        if (model_ && !valid_model()) throw std::runtime_error("mock: model buffer modified after load");
+        const uint8_t fill = model_ ? model_[4] : 0x42;
         const int job_id = next_job_id_.fetch_add(1);
         std::lock_guard<std::mutex> lk(mtx_);
-        threads_.emplace_back([this, job_id, userArg]() {
+        threads_.emplace_back([this, job_id, userArg, fill]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5 + (job_id % 11)));
-            TensorPtrs outputs{std::make_shared<Tensor>(GetOutputSize())};
+            TensorPtrs outputs{std::make_shared<Tensor>(GetOutputSize(), fill)};
             if (callback_) callback_(outputs, userArg);
         });
         return job_id;
     }
 
 private:
+    bool valid_model() const { return model_size_ >= 5 && std::memcmp(model_, "DXNN", 4) == 0; }
+
+    const uint8_t *model_{nullptr};  // in-memory model, or null when loaded from a file
+    size_t model_size_{0};
     std::function<int(TensorPtrs &, void *)> callback_;
     std::atomic<int> next_job_id_{0};
     std::mutex mtx_;

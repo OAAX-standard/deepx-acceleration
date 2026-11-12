@@ -116,6 +116,10 @@ private:
 };
 
 struct ModelContext {
+    // Private copy of ModelConfig.model_data (empty for file models): the caller
+    // may free its buffer once runtime_load_models returns.  Declared before
+    // `engine` so it outlives the engine built from it.
+    std::vector<uint8_t> model_bytes;
     std::unique_ptr<dxrt::InferenceEngine> engine;
     std::vector<uint64_t> output_sizes;
     size_t input_size{0};
@@ -269,6 +273,88 @@ size_t compute_pool_capacity() {
     return static_cast<size_t>(per_device) * static_cast<size_t>(num_devices);
 }
 
+// ---------------------------------------------------------------------------
+// Model loading
+// ---------------------------------------------------------------------------
+
+// Builds the context (engine, output pool, completion callback) for the model
+// at `index` of runtime_load_models' list.  The model is read from model_data
+// when set (file_path then only names it in the log), otherwise from
+// file_path.  On failure the last error is "model[<index>]: ..." and *out is
+// left untouched.
+RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique_ptr<ModelContext> *out) {
+    const std::string prefix = "model[" + std::to_string(index) + "]: ";
+    auto fail = [&prefix](RuntimeStatus status, const std::string &msg) {
+        set_error(prefix + msg);
+        spdlog::error("{}{}", prefix, msg);
+        return status;
+    };
+
+    std::unique_ptr<ModelContext> ctx(new ModelContext());
+    if (mc.model_data) {
+        if (mc.model_size == 0) return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "model_data is set but model_size is 0");
+        ctx->model_bytes.assign(mc.model_data, mc.model_data + mc.model_size);
+        spdlog::info("{}loading model from memory ({} bytes): {}", prefix, mc.model_size,
+                     mc.file_path ? mc.file_path : "(unnamed)");
+    } else if (mc.file_path) {
+        if (!std::ifstream(mc.file_path, std::ios::binary)) {
+            return fail(RUNTIME_STATUS_FILE_NOT_FOUND, std::string("Model file not found: ") + mc.file_path);
+        }
+        spdlog::info("{}loading model: {}", prefix, mc.file_path);
+    } else {
+        return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "Neither model_data nor file_path is set");
+    }
+
+    try {
+        ctx->engine.reset(ctx->model_bytes.empty()
+                              ? new dxrt::InferenceEngine(std::string(mc.file_path))
+                              : new dxrt::InferenceEngine(ctx->model_bytes.data(), ctx->model_bytes.size()));
+    } catch (const std::exception &e) {
+        return fail(RUNTIME_STATUS_INVALID_MODEL, std::string("Failed to load model: ") + e.what());
+    }
+
+    ctx->output_sizes = ctx->engine->GetOutputTensorSizes();
+    ctx->input_size = ctx->engine->GetInputSize();
+    const uint64_t output_total = ctx->engine->GetOutputSize();
+
+    const size_t cap = compute_pool_capacity();
+    ctx->output_pool.reset(new BufferPool(output_total, cap));
+    spdlog::info("{}output pool capacity: {} (input_size={} bytes, output_size={} bytes)", prefix, cap, ctx->input_size,
+                 output_total);
+
+    // Register completion callback.  Captures the raw context pointer; the
+    // engine is destroyed before the context, so this is safe.
+    ModelContext *ctx_raw = ctx.get();
+    ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
+        auto *jd = static_cast<JobData *>(userArg);
+        if (jd) {
+            jd->dxrt_outputs = outputs;
+            // Inference is complete, so DX-RT's asynchronous input encoding
+            // has already read the caller's input.  Release it now (zero-copy
+            // path: nothing was copied at enqueue time).
+            if (jd->input_tensors) {
+                deep_free_tensors(jd->input_tensors);
+                jd->input_tensors = nullptr;
+            }
+            // Lock-free push, then signal a waiting consumer.
+            g_output_queue.enqueue(jd);
+            g_output_sem.signal();
+        }
+        // Decrement in-flight count.  The atomic itself is the source of
+        // truth; we only take the lock + notify on the 0-transition, which
+        // is all cleanup waits for.  This keeps the steady-state completion
+        // path lock-free (the common N->N-1 case touches only the atomic).
+        if (ctx_raw->in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lk(ctx_raw->in_flight_mtx);
+            ctx_raw->in_flight_cv.notify_all();
+        }
+        return 0;
+    });
+
+    *out = std::move(ctx);
+    return RUNTIME_STATUS_SUCCESS;
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -349,70 +435,9 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
         }
     }
 
-    const ModelConfig &mc = model_configs[0];
-    if (!mc.file_path) {
-        set_error("Model file path is null");
-        return RUNTIME_STATUS_INVALID_ARGUMENT;
-    }
-    {
-        std::ifstream f(mc.file_path, std::ios::binary);
-        if (!f) {
-            const std::string msg = std::string("Model file not found: ") + mc.file_path;
-            set_error(msg);
-            spdlog::error("{}", msg);
-            return RUNTIME_STATUS_FILE_NOT_FOUND;
-        }
-    }
-
-    spdlog::info("Loading model: {}", mc.file_path);
-
-    auto ctx = std::unique_ptr<ModelContext>(new ModelContext());
-    try {
-        ctx->engine.reset(new dxrt::InferenceEngine(std::string(mc.file_path)));
-    } catch (const std::exception &e) {
-        const std::string msg = std::string("Failed to load model: ") + e.what();
-        set_error(msg);
-        spdlog::error("{}", msg);
-        return RUNTIME_STATUS_INVALID_MODEL;
-    }
-
-    ctx->output_sizes = ctx->engine->GetOutputTensorSizes();
-    ctx->input_size = ctx->engine->GetInputSize();
-    const uint64_t output_total = ctx->engine->GetOutputSize();
-
-    const size_t cap = compute_pool_capacity();
-    ctx->output_pool.reset(new BufferPool(output_total, cap));
-    spdlog::info("Output pool capacity: {} (input_size={} bytes, output_size={} bytes)", cap, ctx->input_size,
-                 output_total);
-
-    // Register completion callback.  Captures the raw context pointer; the
-    // engine is destroyed before the context, so this is safe.
-    ModelContext *ctx_raw = ctx.get();
-    ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
-        auto *jd = static_cast<JobData *>(userArg);
-        if (jd) {
-            jd->dxrt_outputs = outputs;
-            // Inference is complete, so DX-RT's asynchronous input encoding
-            // has already read the caller's input.  Release it now (zero-copy
-            // path: nothing was copied at enqueue time).
-            if (jd->input_tensors) {
-                deep_free_tensors(jd->input_tensors);
-                jd->input_tensors = nullptr;
-            }
-            // Lock-free push, then signal a waiting consumer.
-            g_output_queue.enqueue(jd);
-            g_output_sem.signal();
-        }
-        // Decrement in-flight count.  The atomic itself is the source of
-        // truth; we only take the lock + notify on the 0-transition, which
-        // is all cleanup waits for.  This keeps the steady-state completion
-        // path lock-free (the common N->N-1 case touches only the atomic).
-        if (ctx_raw->in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard<std::mutex> lk(ctx_raw->in_flight_mtx);
-            ctx_raw->in_flight_cv.notify_all();
-        }
-        return 0;
-    });
+    std::unique_ptr<ModelContext> ctx;
+    const RuntimeStatus status = create_model_context(model_configs[0], 0, &ctx);
+    if (status != RUNTIME_STATUS_SUCCESS) return status;
 
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
