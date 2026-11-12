@@ -26,15 +26,15 @@ On Linux, the library is built using **Docker** containers to ensure consistent 
 
 - **Windows builds (native)**
     - **Host OS**: Windows 10/11 x86_64
-    - **CMake** and **Visual Studio 2022** with C++ workload
-    - **DX-RT Windows SDK** (prebuilt, containing `include/` and `lib/`)
+    - **Visual Studio 2022** with the *Desktop development with C++* workload (it includes CMake and vcpkg)
+    - **DX-RT**: the DX-SDK Windows Installer, or the public `dx_rt` source (see [Windows DX-RT](#windows-dx-rt))
     - **PowerShell** to run the build script
 
 ### Installing DX-RT
 
-The DX-RT versions this runtime is built and tested against are pinned in this directory:
-`dxrt_version.txt` (Linux, currently `3.5.0`) and `dxrt_windows_commit.txt` (Windows SDK commit).
-CI downloads exactly those; use the same versions locally.
+The DX-RT version this runtime is built and tested against is pinned in `dxrt_version.txt`
+(currently `3.5.0`), for Linux and Windows. CI builds exactly that tag of the public
+[`dx_rt`](https://github.com/DEEPX-AI/dx_rt) source; use the same version locally.
 
 #### Linux (Ubuntu) DX-RT
 
@@ -65,17 +65,21 @@ Once cloned, follow the `DX-RT` repository's documentation to build and install 
 
 #### Windows DX-RT
 
-For Windows builds, use the dedicated DX-RT Windows repository. 
+Running the runtime on Windows needs the **DX-SDK Windows Installer 1.3.2 or later** (DX-RT 3.5.0,
+Windows driver 2.0.1), from [developer.deepx.ai/sw-download](https://developer.deepx.ai/sw-download)
+(login required). Install at least the *Driver*, *Runtime* and *C/C++ SDK* components (the
+`Standard` profile). It installs to `C:\Program Files\DEEPX\M1_M1M_Series\DX-RUNTIME\<version>`,
+sets `DEEPX_M1_DIR` to that directory and puts its `bin` (with `dxrt.dll`) on `PATH`. DX-RT 3.5.0
+also needs DX-M1 firmware 2.7.6 or later: check with `dxrt-cli -s` and update with
+`dxrt-cli -u "$env:DEEPX_M1_DIR\fw\m1\fw.bin"` if needed.
+
+To build, the installed SDK is all you need. Alternatively, build against the public `dx_rt` source,
+as CI does (the build script builds and installs it under `dx_rt\out\install\` first):
 
 ```powershell
 cd runtime-library
-git clone https://github.com/DEEPX-AI/dx_rt_windows.git
-git -C dx_rt_windows checkout "$(Get-Content dxrt_windows_commit.txt)"
+git clone --branch "v$(Get-Content dxrt_version.txt)" https://github.com/DEEPX-AI/dx_rt.git
 ```
-
-This repository provides prebuilt Windows runtime libraries, drivers, and SDK files for DeepX NPUs.
-
-For installation and usage details, refer to the `DX-RT Windows` repository's documentation.
 
 ---
 ## Usage
@@ -98,21 +102,19 @@ Builds an aarch64 runtime library on an x86_64 host. Not supported in the revers
 
 ### Windows builds (native)
 
-Use the PowerShell build script to generate `RuntimeLibrary.dll` using the prebuilt DX-RT Windows SDK (run this from a PowerShell prompt):
+Use the PowerShell build script (run it from a PowerShell prompt) against the installed DX-SDK:
 
 ```powershell
-./build-windows.ps1 -DxrtRoot "C:\path\to\DX_RT_SDK" -Configuration Release
+./build-windows.ps1 -DxrtRoot $env:DEEPX_M1_DIR
 ```
 
-When dx_rt_windows is cloned under `runtime-library` as shown above, a concrete example is:
+or, without `-DxrtRoot`, against the public `dx_rt` source cloned into `runtime-library\dx_rt`:
 
 ```powershell
-./build-windows.ps1 `
-    -DxrtRoot "dx_rt_windows\m1\<version>\dx_rt" `
-    -Configuration Release
+./build-windows.ps1
 ```
 
-- `-DxrtRoot`: Path to the DX-RT Windows SDK root directory (must contain `include/` and `lib/`).
+- `-DxrtRoot`: Optional DX-RT SDK directory, containing `include\dxrt\`, `lib\dxrt.lib` and `lib\cmake\dxrt\` (the DX-SDK Windows Installer's install directory). If omitted, `dx_rt` is built from source with its `x64-Release` CMake preset (needs vcpkg: `VCPKG_ROOT`, set by the Visual Studio developer environment).
 - `-Configuration`: Optional build configuration (`Release` by default, `Debug` also supported).
 - `-RuntimeVersion`: Optional OAAX runtime version. If omitted, the script reads the repository `VERSION` file (`../VERSION`).
 
@@ -126,7 +128,7 @@ When dx_rt_windows is cloned under `runtime-library` as shown above, a concrete 
 The compiled runtime libraries are saved under the `artifacts/` directory.
 
 - **Linux**: `libRuntimeLibrary.so` plus `library-dxrt-<dxrt version>.tar.gz` (the archive CI uploads), structured by target architecture and Ubuntu version based on the build environment.
-- **Windows**: `RuntimeLibrary.dll`, structured by target architecture and OS.
+- **Windows**: `RuntimeLibrary.dll`, its import library `RuntimeLibrary.lib`, and `library-dxrt-<dxrt version>.tar.gz` (the archive CI uploads), which holds `RuntimeLibrary.dll` only. `dxrt.dll` is not redistributed: the DLL loads the one the DX-SDK Windows Installer put on `PATH`.
 
 #### Output Structure
 ```
@@ -144,7 +146,8 @@ artifacts/
 ├── aarch64-ubuntu24.04/
 │   └── libRuntimeLibrary.so
 └── x86_64-windows/
-    └── RuntimeLibrary.dll
+    ├── RuntimeLibrary.dll
+    └── RuntimeLibrary.lib
 ```
 
 ---

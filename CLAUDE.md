@@ -28,10 +28,16 @@ Output: `runtime-library/artifacts/{arch}-ubuntu{version}/`.
 ### Runtime Library — Windows
 
 ```powershell
-./runtime-library/build-windows.ps1 -DxrtRoot "path/to/dx_rt_sdk" -Configuration Release
+# Against the installed DX-SDK Windows Installer (1.3.2+, DX-RT 3.5.0)
+./runtime-library/build-windows.ps1 -DxrtRoot $env:DEEPX_M1_DIR
+# Or omit -DxrtRoot to build the public dx_rt source cloned into runtime-library/dx_rt first (what CI does)
+./runtime-library/build-windows.ps1
+
+# inference_runner.exe against the built DLL
+./tests/runtime/build-tests.ps1
 ```
 
-Requires Visual Studio 2022. Output: `runtime-library/artifacts/x86_64-windows/RuntimeLibrary.dll`.
+Requires Visual Studio 2022. Output: `runtime-library/artifacts/x86_64-windows/` (`RuntimeLibrary.dll`, import library `RuntimeLibrary.lib`, `library-dxrt-v<ver>.tar.gz`). `dxrt.dll` is never bundled; at run time it comes from the installer's `bin` on `PATH`.
 
 ### Conversion Toolchain
 
@@ -65,7 +71,8 @@ DeepX NPU (DX-M1 / DX-H1)
 - **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool per model, plus a bounded per-model pending queue (`max_pending_requests` init key, default 256) for requests beyond it, submitted as outputs are retrieved. Pool and queue both full returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
 - **Logging**: spdlog (vendored under `runtime-library/deps/`, see `THIRD_PARTY_NOTICES.md`); log file is `./runtime.log` unless `DEEPX_RUNTIME_LOG_FILE` is set
 - **Build standard**: C++14 (required by the DX-RT C++ header), CMake 3.14+
-- **DX-RT version pin**: `runtime-library/dxrt_version.txt` (Linux source) and `runtime-library/dxrt_windows_commit.txt` (Windows SDK)
+- **DX-RT version pin**: `runtime-library/dxrt_version.txt` (public `dx_rt` tag, Linux and Windows)
+- **Exports**: only the 9 `runtime_*` functions — Linux via `runtime_core.map` + hidden visibility, Windows via `RUNTIME_API` (`__declspec(dllexport)`)
 - **Unit tests** (no hardware): `runtime-library/test/` builds `runtime_core.cpp` against a mock DX-RT (`test/mock_dxrt/`) — keep the mock in sync with the DX-RT calls the runtime makes
 
 ### Conversion Toolchain internals

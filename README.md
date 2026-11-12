@@ -56,11 +56,11 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 
 - **Supported Chips**: DX-M1, DX-H1 
 - **OAAX version**: 2.0 (callback-based C API, see [`runtime-library/include/runtime_core.h`](runtime-library/include/runtime_core.h))
-- **Required DX-RT version**: Must match the version used during the runtime-library build process. The version used by this repo is pinned in `runtime-library/dxrt_version.txt` (Linux) and `runtime-library/dxrt_windows_commit.txt` (Windows)
+- **Required DX-RT version**: Must match the version used during the runtime-library build process. The version used by this repo is pinned in `runtime-library/dxrt_version.txt` (Linux and Windows)
 
 > On Linux, the runtime-library is built inside a Docker environment that mimics the target architecture and OS version, with DeepX Runtime (DX-RT) preinstalled. Therefore, the resulting `libRuntimeLibrary.so` must be used in a runtime environment that matches the same architecture, OS version, and has the same DX-RT version installed.
 >
-> On Windows, the runtime-library is built natively using CMake and Visual Studio against the DX-RT Windows SDK. The resulting `RuntimeLibrary.dll` must be used with a matching DX-RT Windows SDK version.
+> On Windows, the runtime-library is built natively with Visual Studio 2022 against the same DX-RT version (the DX-SDK Windows Installer's SDK or the public `dx_rt` source). `RuntimeLibrary.dll` does not bundle `dxrt.dll`: it uses the one installed by the DX-SDK Windows Installer (1.3.2 or later for DX-RT 3.5.0).
 
 ---
 
@@ -75,7 +75,7 @@ Upon successful build, an `artifacts/` directory will be created in each compone
 ## Limitations
 
 - **Linux builds**: Currently supported for Ubuntu-based targets (20.04, 22.04, and 24.04).
-- **Windows builds**: Not supported yet; the CI job is disabled. The build script (`runtime-library/build-windows.ps1`, Visual Studio 2022 + DX-RT Windows SDK) is kept for when support lands.
+- **Windows builds**: x86_64 only, built with Visual Studio 2022 (`runtime-library/build-windows.ps1`).
 
 ---
 

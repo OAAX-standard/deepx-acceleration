@@ -130,6 +130,14 @@ bash tests/runtime/build-tests.sh \
     --build-dir tests/runtime/build-x86_64
 ```
 
+On Windows (after `runtime-library\build-windows.ps1`), this builds
+`tests\runtime\build\Release\inference_runner.exe` and copies `RuntimeLibrary.dll` next to it;
+`dxrt.dll` comes from the DX-SDK Windows Installer on `PATH`:
+
+```powershell
+.\tests\runtime\build-tests.ps1 [-RuntimeLibDir <dir>] [-BuildDir <dir>]
+```
+
 ### 3. Run
 
 ```bash

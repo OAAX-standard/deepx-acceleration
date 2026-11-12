@@ -56,7 +56,11 @@ struct Model {
 };
 
 static std::string file_stem(const std::string &path) {
+#ifdef _WIN32
+    size_t slash = path.find_last_of("/\\");
+#else
     size_t slash = path.rfind('/');
+#endif
     std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
     size_t dot = name.rfind('.');
     return (dot == std::string::npos) ? name : name.substr(0, dot);
