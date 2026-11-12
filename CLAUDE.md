@@ -14,11 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Runtime Library — Linux
 
 ```bash
+cd runtime-library  # the script must be run from this directory
 # Build for host architecture (inside Docker)
-./runtime-library/build-runtimes.sh --ubuntu_version 22.04
+./build-runtimes.sh --ubuntu_version 22.04
 
 # Cross-compile aarch64 on x86_64 host
-./runtime-library/build-runtimes.sh --ubuntu_version 22.04 --cross-aarch64
+./build-runtimes.sh --ubuntu_version 22.04 --cross-aarch64
 ```
 
 Supported `--ubuntu_version` values: `20.04`, `22.04`, `24.04`.  
@@ -60,6 +61,7 @@ DeepX NPU (DX-M1 / DX-H1)
 - **Entry point**: `runtime-library/src/runtime_core.cpp`
 - **Public C API** (OAAX 2.0, also defines the tensor types): `runtime-library/include/runtime_core.h`
 - **Lifecycle**: `runtime_init()` → `runtime_load_models()` → `runtime_enqueue_input()` / `runtime_retrieve_output()` (loop) → `runtime_cleanup()`
+- **Models**: `runtime_load_models(n)` loads all `n` models or none (model id = array index); each model is read from `model_data`/`model_size` if set, else from `file_path`. Output pools are per model; all outputs share one queue and are returned with their model id.
 - **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool. A full pool returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
 - **Logging**: spdlog (vendored under `runtime-library/deps/`, see `THIRD_PARTY_NOTICES.md`); log file is `./runtime.log` unless `DEEPX_RUNTIME_LOG_FILE` is set
 - **Build standard**: C++11, CMake 3.14+

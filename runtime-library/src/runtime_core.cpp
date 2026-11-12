@@ -23,10 +23,17 @@
 //     pooled inputs because fresh pointers hit DMA errno=-70 (WRITE_INPUT) after
 //     ~10 runs on a fast model.  Re-validate on hardware (10k pipelined runs of
 //     squeezenet1_1) after any DX-RT upgrade.
-//   - The output buffer pool grows lazily up to dxrt_get_task_max_load() ×
-//     NumDevice, matching DX-RT's own in-flight limit.  It caps memory and
-//     applies backpressure without manual tuning: a 1-channel setup uses a
-//     tiny pool, a 32-channel quad-H1 setup a large one.
+//   - Each model has its own output buffer pool, grown lazily up to
+//     dxrt_get_task_max_load() × NumDevice buffers of that model's output
+//     size, matching DX-RT's own in-flight limit.  It caps memory and applies
+//     backpressure without manual tuning: a 1-channel setup uses a tiny pool,
+//     a 32-channel quad-H1 setup a large one.  The worst case grows with the
+//     number of models, and a full pool rejects (TIMEOUT) only its own model.
+//   - Each job holds a reference to its ModelContext, so the context (and its
+//     pool) outlives every job of that model, even across runtime_cleanup.
+//   - A request holds an output buffer from enqueue until it is retrieved, so
+//     runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
+//     the number of pool buffers in use.
 
 #include "runtime_core.h"
 

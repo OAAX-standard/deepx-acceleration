@@ -152,12 +152,14 @@ artifacts/
 
 Lifecycle: `runtime_init` → `runtime_load_models` → loop of `runtime_enqueue_input` / `runtime_retrieve_output` → `runtime_cleanup`.
 
-- **Single model** per process for now; `runtime_load_models` rejects `num_models != 1`.
+- **Loading models**: `runtime_load_models` loads all `num_models` models in one call, or none. Model `i` of the array gets model id `i`; an error message starts with `model[<i>]: `. Models can be loaded once per `runtime_init`: a second call returns `RUNTIME_STATUS_ALREADY_INITIALIZED`. Loading and `runtime_cleanup` are serialized.
+- **Model source**: if `model_data` is set the model is read from memory (`model_size` must be non-zero), otherwise from `file_path`; neither set gives `RUNTIME_STATUS_INVALID_ARGUMENT`. When both are set, `model_data` is used. The caller may free `model_data` as soon as the call returns (DX-RT copies the model; the runtime keeps no reference).
 - **Input ownership**: on `RUNTIME_STATUS_SUCCESS` the runtime owns the `Tensors` passed to `runtime_enqueue_input` and frees it itself (input is passed to DX-RT zero-copy). On *any other* return the caller keeps ownership and must free it.
 - **Output ownership**: the `Tensors` returned by `runtime_retrieve_output` is owned by the caller.
 - **Input validation**: the first tensor's `data_size` must equal the model's input size, otherwise `RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH`.
-- **Backpressure**: the output buffer pool is bounded by DX-RT's in-flight limit × device count. When exhausted, `runtime_enqueue_input` returns `RUNTIME_STATUS_TIMEOUT` immediately — retry later or drop the frame.
-- **Results are unordered**: match them to requests via the echoed `Tensors::id`.
+- **Backpressure**: each model has its own output buffer pool, grown lazily up to DX-RT's in-flight limit (`dxrt_get_task_max_load()`) × device count buffers of that model's output size, so worst-case memory grows with the number of models. When a model's pool is exhausted, `runtime_enqueue_input` for that model returns `RUNTIME_STATUS_TIMEOUT` immediately — retry later or drop the frame; other models are not affected.
+- **Results are unordered**: outputs of all models share one queue. `runtime_retrieve_output` returns the model id with each output; match outputs to requests via the echoed `Tensors::id`.
+- **Info**: in `runtime_get_info()`, `requests_in_flight` counts requests accepted by `runtime_enqueue_input` and not yet retrieved.
 - **Errors**: `runtime_get_error()` returns the last error text (a per-thread copy, valid until that thread's next call).
 - **Logging**: written to stderr and to `./runtime.log`; set `DEEPX_RUNTIME_LOG_FILE` to change the file and `SPDLOG_LEVEL` for verbosity.
 - **DX-RT dynamic CPU threads**: `DXRT_DYNAMIC_CPU_THREAD=ON` is set by `runtime_init` unless the variable is already set (so `OFF` is respected).

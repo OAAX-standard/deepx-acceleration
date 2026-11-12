@@ -167,6 +167,22 @@ pytest tests/test_inference.py -v
 
 Tests are skipped automatically if `inference_runner` is not built or no compiled models are found.
 
+### Run `inference_runner` directly
+
+`--model` and `--input-size` (and, optionally, `--input-shape` and `--image`) are given once per model;
+the Nth of each belongs to the Nth `--model`. Several models are loaded in one `runtime_load_models`
+call and the timed requests are sent round-robin across them, with `--pipeline-depth` requests in flight
+per model. `--from-memory` reads each model file into memory, loads it from that buffer and frees the
+buffer right after loading. Output is one line (or CSV row) per model; `--runs` is per model and
+`throughput_fps` is each model's rate while all models run together. Argument errors exit with 2.
+
+```bash
+tests/runtime/build/inference_runner \
+    --model tests/compiled_models/squeezenet1_1/squeezenet1_1.dxnn --input-size 150528 \
+    --model tests/compiled_models/yolo11n/yolo11n.dxnn --input-size 1228800 \
+    --from-memory --pipeline-depth 16 --runs 2000 --csv
+```
+
 ---
 
 ## Unit tests (no hardware or Docker)
@@ -245,5 +261,5 @@ cd deepx-stage2-<version>
 |---|---|---|
 | `test_models.py` | `models.py` metadata (keys, shapes, dtypes, sizes) | Nothing |
 | `test_conversion.py` | Stage 1 — DXNN files produced and convert.log shows success | Docker + toolchain image |
-| `test_inference.py` | Stage 2 — inference_runner exits 0, metrics are valid | DeepX hardware + built runtime |
+| `test_inference.py` | Stage 2 — inference_runner exits 0, metrics are valid (one model, and two models loaded from memory) | DeepX hardware + built runtime |
 | `stage1.py` / `stage2.py` | Entry points that run stage 1 (pytest) / stage 2 (all compiled models, prints a metrics table) | see above |

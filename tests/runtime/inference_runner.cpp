@@ -3,12 +3,10 @@
 #include <string.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <numeric>
-#include <queue>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,62 +14,76 @@
 #include "runtime_core.h"
 #include "yolo_postprocess.hpp"
 
+typedef std::chrono::high_resolution_clock Clock;
+
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --model <path> --input-size <bytes> [options]\n"
+            "Usage: %s --model <path> --input-size <bytes> [--model <path> --input-size <bytes> ...] [options]\n"
             "\n"
-            "Required:\n"
+            "Per model (repeat for each model; the Nth of each option belongs to the Nth --model):\n"
             "  --model <path>         Path to the .dxnn model file\n"
-            "  --input-size <bytes>   Size of the input tensor data in bytes\n"
+            "  --input-size <bytes>   Size of the input tensor data in bytes (required)\n"
+            "  --input-shape N,H,W,C  Input tensor shape (default: unset; give for all models or none)\n"
+            "  --image <path>         Raw uint8 HWC input file (default: zeros; give for all models or none)\n"
             "\n"
             "Optional:\n"
-            "  --input-shape N,H,W,C  Input tensor shape (default: unset)\n"
-            "  --image <path>         Raw uint8 HWC image file to use as input (default: zeros)\n"
-            "  --runs <N>             Number of timed inference runs (default: 100)\n"
-            "  --warmup <N>           Number of warmup runs, sequential (default: 10)\n"
-            "  --pipeline-depth <N>   Requests kept in-flight simultaneously (default: 4)\n"
-            "  --csv                  Print results in CSV format\n"
+            "  --from-memory          Load models from memory buffers (freed right after loading)\n"
+            "  --runs <N>             Number of timed inference runs per model (default: 100)\n"
+            "  --warmup <N>           Number of warmup runs per model, sequential (default: 10)\n"
+            "  --pipeline-depth <N>   Requests kept in flight per model (default: 4)\n"
+            "  --csv                  Print results in CSV format, one row per model\n"
+            "\n"
+            "Timed requests are sent round-robin across the models; throughput_fps is each model's\n"
+            "rate while all models run together.\n"
             "\n"
             "CSV header: model,runs,avg_ms,p50_ms,p95_ms,min_ms,max_ms,throughput_fps\n",
             prog);
 }
 
 // ---------------------------------------------------------------------------
-// Simple semaphore — limits in-flight requests to pipeline_depth
+// Model and tensor helpers
 // ---------------------------------------------------------------------------
 
-struct Semaphore {
-    explicit Semaphore(int n) : count_(n) {}
-
-    void acquire() {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [this] { return count_ > 0; });
-        --count_;
-    }
-
-    void release() {
-        std::lock_guard<std::mutex> lock(mtx_);
-        ++count_;
-        cv_.notify_one();
-    }
-
-private:
-    int count_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
+struct Model {
+    const char *path;
+    std::string name;  // file name without directory and extension
+    size_t input_size;
+    std::vector<int> shape;
+    std::vector<uint8_t> image;  // input data; empty means zeros
+    yolo::Family family;
 };
 
-// ---------------------------------------------------------------------------
-// Tensor helpers
-// ---------------------------------------------------------------------------
+static std::string file_stem(const std::string &path) {
+    size_t slash = path.rfind('/');
+    std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    size_t dot = name.rfind('.');
+    return (dot == std::string::npos) ? name : name.substr(0, dot);
+}
 
-static int g_request_id = 0;
+static std::string shape_str(const int *dims, int rank) {
+    std::string s = "[";
+    for (int i = 0; i < rank; i++) s += std::to_string(dims[i]) + (i + 1 < rank ? "," : "");
+    return s + "]";
+}
 
-static Tensors *make_input(size_t data_size, const std::vector<int> &shape, const uint8_t *image_buf = nullptr) {
+static bool read_file(const char *path, std::vector<uint8_t> &data) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    long size = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+    bool ok = size >= 0 && fseek(f, 0, SEEK_SET) == 0;
+    if (ok) {
+        data.resize((size_t)size);
+        ok = fread(data.data(), 1, data.size(), f) == data.size();
+    }
+    fclose(f);
+    return ok;
+}
+
+static Tensors *make_input(int id, const Model &model) {
     Tensors *t = (Tensors *)malloc(sizeof(Tensors));
     if (!t) return nullptr;
 
-    t->id = g_request_id++;
+    t->id = id;
     t->num_tensors = 1;
     t->tensors = (TensorDescriptor *)calloc(1, sizeof(TensorDescriptor));
     if (!t->tensors) {
@@ -79,28 +91,29 @@ static Tensors *make_input(size_t data_size, const std::vector<int> &shape, cons
         return nullptr;
     }
 
-    t->tensors[0].name = strdup("input");
-    t->tensors[0].data_type = DATA_TYPE_UINT8;
-    t->tensors[0].rank = (int)shape.size();
-    t->tensors[0].shape = nullptr;
-    if (!shape.empty()) {
-        t->tensors[0].shape = (int *)malloc(shape.size() * sizeof(int));
-        if (t->tensors[0].shape) memcpy(t->tensors[0].shape, shape.data(), shape.size() * sizeof(int));
+    TensorDescriptor &td = t->tensors[0];
+    td.name = strdup("input");
+    td.data_type = DATA_TYPE_UINT8;
+    td.rank = (int)model.shape.size();
+    td.shape = nullptr;
+    if (!model.shape.empty()) {
+        td.shape = (int *)malloc(model.shape.size() * sizeof(int));
+        if (td.shape) memcpy(td.shape, model.shape.data(), model.shape.size() * sizeof(int));
     }
-    t->tensors[0].data_size = data_size;
-    t->tensors[0].data = malloc(data_size);
-    if (!t->tensors[0].data || !t->tensors[0].name) {
-        free(t->tensors[0].name);
-        free(t->tensors[0].shape);
-        free(t->tensors[0].data);
+    td.data_size = model.input_size;
+    td.data = malloc(model.input_size);
+    if (!td.data || !td.name || (td.rank > 0 && !td.shape)) {
+        free(td.name);
+        free(td.shape);
+        free(td.data);
         free(t->tensors);
         free(t);
         return nullptr;
     }
-    if (image_buf)
-        memcpy(t->tensors[0].data, image_buf, data_size);
+    if (model.image.empty())
+        memset(td.data, 0, model.input_size);
     else
-        memset(t->tensors[0].data, 0, data_size);
+        memcpy(td.data, model.image.data(), model.input_size);
     return t;
 }
 
@@ -138,28 +151,99 @@ static std::vector<int> parse_shape(const char *s) {
     return shape;
 }
 
+// Loads all models in one runtime_load_models call; model i gets model id i.
+// With from_memory, the file contents are passed as model_data and freed as soon
+// as the call returns: the runtime keeps no reference to them.
+static bool load_models(const std::vector<Model> &models, bool from_memory) {
+    std::vector<ModelConfig> configs(models.size());  // value-initialized: all fields null/zero
+    std::vector<std::vector<uint8_t>> blobs(from_memory ? models.size() : 0);
+    for (size_t i = 0; i < models.size(); i++) {
+        if (!from_memory) {
+            configs[i].file_path = models[i].path;
+            continue;
+        }
+        if (!read_file(models[i].path, blobs[i])) {
+            fprintf(stderr, "Error: cannot read model file: %s\n", models[i].path);
+            return false;
+        }
+        configs[i].model_data = blobs[i].data();
+        configs[i].model_size = blobs[i].size();
+    }
+    if (runtime_load_models((int)models.size(), configs.data()) != RUNTIME_STATUS_SUCCESS) {
+        fprintf(stderr, "runtime_load_models failed: %s\n", runtime_get_error());
+        return false;
+    }
+    return true;
+}
+
+// Sequential runs so the hardware is in a stable state before pipelined timing.
+// Logs the output tensors (and YOLO detections) of each model's first run.
+static bool warmup(const std::vector<Model> &models, int runs) {
+    for (int i = 0; i < runs; i++) {
+        for (size_t m = 0; m < models.size(); m++) {
+            const Model &model = models[m];
+            Tensors *inp = make_input(i, model);
+            if (!inp) {
+                fprintf(stderr, "[warmup] OOM at run %d/%d\n", i + 1, runs);
+                return false;
+            }
+            if (runtime_enqueue_input((int)m, inp) != RUNTIME_STATUS_SUCCESS) {
+                fprintf(stderr, "[warmup] %s: enqueue failed at run %d/%d: %s\n", model.name.c_str(), i + 1, runs,
+                        runtime_get_error());
+                free_tensors(inp);
+                return false;
+            }
+            int out_model = -1;
+            Tensors *out = nullptr;
+            if (runtime_retrieve_output(&out_model, &out, -1) != RUNTIME_STATUS_SUCCESS) {
+                fprintf(stderr, "[warmup] %s: retrieve failed at run %d/%d: %s\n", model.name.c_str(), i + 1, runs,
+                        runtime_get_error());
+                free_tensors(out);
+                return false;
+            }
+            if (out_model != (int)m) {
+                fprintf(stderr, "[warmup] %s: output returned for model %d, expected %zu\n", model.name.c_str(),
+                        out_model, m);
+                free_tensors(out);
+                return false;
+            }
+            if (i == 0) {
+                fprintf(stderr, "[output tensor] %s: num_tensors=%d\n", model.name.c_str(), out->num_tensors);
+                for (int j = 0; j < out->num_tensors; j++) {
+                    const TensorDescriptor &td = out->tensors[j];
+                    fprintf(stderr, "[output tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n", j,
+                            td.name ? td.name : "(null)", (int)td.data_type, td.rank,
+                            shape_str(td.shape, td.rank).c_str(), td.data_size);
+                }
+                if (model.family != yolo::Family::UNKNOWN)
+                    yolo::log_detections(yolo::postprocess(out, model.family), model.name.c_str());
+            }
+            free_tensors(out);
+        }
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Shared state between producer and consumer threads
 // ---------------------------------------------------------------------------
 
 struct SharedState {
+    SharedState(size_t num_models, size_t num_requests)
+        : enqueue_times(num_requests), latencies_ms(num_models), in_flight(num_models, 0) {}
+
     // Guards everything below; cv signals a change of submitted/retired/done/error.
     std::mutex mutex;
     std::condition_variable cv;
 
-    // Enqueue timestamps, pushed by producer, popped by consumer (FIFO)
-    std::queue<std::chrono::high_resolution_clock::time_point> enqueue_times;
-    std::vector<double> latencies_ms;
-    int submitted = 0;  // requests accepted by the runtime
-    int retired = 0;    // outputs retrieved
+    std::vector<Clock::time_point> enqueue_times;   // indexed by request id
+    std::vector<std::vector<double>> latencies_ms;  // per model
+    std::vector<int> in_flight;                     // per model: accepted, not yet retrieved
+    int submitted = 0;                              // requests accepted by the runtime
+    int retired = 0;                                // outputs retrieved
     bool producer_done = false;
     bool error = false;
 };
-
-static bool has_failed(SharedState &state) {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    return state.error;
-}
 
 static void fail(SharedState &state) {
     {
@@ -170,51 +254,56 @@ static void fail(SharedState &state) {
 }
 
 // ---------------------------------------------------------------------------
-// Producer: enqueues num_runs requests, bounded by semaphore
+// Producer: enqueues runs requests per model, round-robin, at most
+// pipeline_depth in flight per model
 // ---------------------------------------------------------------------------
 
-static void producer_thread(int num_runs, size_t input_size, const std::vector<int> &shape, Semaphore &sem,
-                            SharedState &state, const uint8_t *image_buf) {
-    for (int i = 0; i < num_runs && !has_failed(state); i++) {
-        sem.acquire();
+static void producer_thread(const std::vector<Model> &models, int runs, int pipeline_depth, SharedState &state) {
+    const int num_models = (int)models.size();
+    const int total = runs * num_models;
+    for (int id = 0; id < total; id++) {
+        const int m = id % num_models;
+        {
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.cv.wait(lock, [&] { return state.in_flight[m] < pipeline_depth || state.error; });
+            if (state.error) break;
+        }
 
-        Tensors *inp = make_input(input_size, shape, image_buf);
+        Tensors *inp = make_input(id, models[m]);
         if (!inp) {
-            fprintf(stderr, "[producer] OOM at run %d/%d\n", i + 1, num_runs);
+            fprintf(stderr, "[producer] OOM at request %d/%d\n", id + 1, total);
             fail(state);
-            sem.release();
             break;
         }
 
-        auto t = std::chrono::high_resolution_clock::now();
         RuntimeStatus s;
         {
             std::unique_lock<std::mutex> lock(state.mutex);
-            state.enqueue_times.push(t);
+            state.enqueue_times[id] = Clock::now();
             // A full output pool (TIMEOUT) is backpressure: the input stays ours.
             // The consumer is the only one retrieving, so wait for it to retire
             // an output (freeing a pool slot), then retry.
             for (;;) {
                 const int seen = state.retired;
                 lock.unlock();
-                s = runtime_enqueue_input(0, inp);
+                s = runtime_enqueue_input(m, inp);
                 lock.lock();
                 if (s != RUNTIME_STATUS_TIMEOUT) break;
                 state.cv.wait(lock, [&] { return state.retired != seen || state.error; });
                 if (state.error) break;
             }
+            if (s == RUNTIME_STATUS_SUCCESS) {
+                state.in_flight[m]++;
+                state.submitted++;
+            }
         }
         if (s != RUNTIME_STATUS_SUCCESS) {
             if (s != RUNTIME_STATUS_TIMEOUT)
-                fprintf(stderr, "[producer] enqueue failed at run %d/%d: %s\n", i + 1, num_runs, runtime_get_error());
+                fprintf(stderr, "[producer] %s: enqueue failed at request %d/%d: %s\n", models[m].name.c_str(), id + 1,
+                        total, runtime_get_error());
             free_tensors(inp);
             fail(state);
-            sem.release();
             break;
-        }
-        {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.submitted++;
         }
         state.cv.notify_all();
     }
@@ -229,9 +318,10 @@ static void producer_thread(int num_runs, size_t input_size, const std::vector<i
 
 // ---------------------------------------------------------------------------
 // Consumer: retrieves outputs of accepted requests, records per-request latency
+// under the model id the runtime returns with each output
 // ---------------------------------------------------------------------------
 
-static void consumer_thread(Semaphore &sem, SharedState &state) {
+static void consumer_thread(SharedState &state) {
     for (;;) {
         {
             // Retrieve only while an output is guaranteed to arrive, so the
@@ -241,26 +331,30 @@ static void consumer_thread(Semaphore &sem, SharedState &state) {
             if (state.error || state.retired == state.submitted) return;
         }
 
-        int out_model = -1;
+        int m = -1;
         Tensors *out = nullptr;
-        RuntimeStatus s = runtime_retrieve_output(&out_model, &out, -1);
-        auto t_out = std::chrono::high_resolution_clock::now();
-
+        RuntimeStatus s = runtime_retrieve_output(&m, &out, -1);
+        const Clock::time_point t_out = Clock::now();
+        const int id = out ? out->id : -1;
         free_tensors(out);
-        sem.release();
         if (s != RUNTIME_STATUS_SUCCESS) {
             fprintf(stderr, "[consumer] retrieve failed: %s\n", runtime_get_error());
             fail(state);
             return;
         }
-        if (out_model != 0) fprintf(stderr, "[consumer] unexpected out_model=%d\n", out_model);
 
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            state.latencies_ms.push_back(
-                std::chrono::duration<double, std::milli>(t_out - state.enqueue_times.front()).count());
-            state.enqueue_times.pop();
-            state.retired++;
+            if (m < 0 || (size_t)m >= state.in_flight.size() || id < 0 || (size_t)id >= state.enqueue_times.size() ||
+                id % (int)state.in_flight.size() != m) {
+                fprintf(stderr, "[consumer] unexpected output: model %d, request id %d\n", m, id);
+                state.error = true;
+            } else {
+                state.latencies_ms[m].push_back(
+                    std::chrono::duration<double, std::milli>(t_out - state.enqueue_times[id]).count());
+                state.in_flight[m]--;
+                state.retired++;
+            }
         }
         state.cv.notify_all();
     }
@@ -271,200 +365,102 @@ static void consumer_thread(Semaphore &sem, SharedState &state) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
-    const char *model_path = nullptr;
-    const char *image_path = nullptr;
-    size_t input_size = 0;
-    std::vector<int> input_shape;
+    std::vector<const char *> model_paths, image_paths;
+    std::vector<size_t> input_sizes;
+    std::vector<std::vector<int>> input_shapes;
     int num_runs = 100;
-    int warmup = 10;
+    int warmup_runs = 10;
     int pipeline_depth = 4;
+    bool from_memory = false;
     bool csv_mode = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
-            model_path = argv[++i];
+            model_paths.push_back(argv[++i]);
         } else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
-            image_path = argv[++i];
+            image_paths.push_back(argv[++i]);
         } else if (strcmp(argv[i], "--input-size") == 0 && i + 1 < argc) {
-            input_size = (size_t)atoll(argv[++i]);
+            input_sizes.push_back((size_t)atoll(argv[++i]));
         } else if (strcmp(argv[i], "--input-shape") == 0 && i + 1 < argc) {
-            input_shape = parse_shape(argv[++i]);
+            input_shapes.push_back(parse_shape(argv[++i]));
         } else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
             num_runs = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
-            warmup = atoi(argv[++i]);
+            warmup_runs = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--pipeline-depth") == 0 && i + 1 < argc) {
             pipeline_depth = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--from-memory") == 0) {
+            from_memory = true;
         } else if (strcmp(argv[i], "--csv") == 0) {
             csv_mode = true;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             print_usage(argv[0]);
-            return 1;
+            return 2;
         }
     }
 
-    if (!model_path || input_size == 0) {
+    const size_t num_models = model_paths.size();
+    const bool sizes_valid = std::find(input_sizes.begin(), input_sizes.end(), (size_t)0) == input_sizes.end();
+    if (num_models == 0 || input_sizes.size() != num_models || !sizes_valid ||
+        (!input_shapes.empty() && input_shapes.size() != num_models) ||
+        (!image_paths.empty() && image_paths.size() != num_models) || num_runs < 1 || warmup_runs < 0 ||
+        pipeline_depth < 1) {
+        fprintf(stderr, "Error: invalid or unpaired arguments\n");
         print_usage(argv[0]);
-        return 1;
+        return 2;
     }
 
-    // Startup config summary
-    fprintf(stderr, "[config] model=%s input_size=%zu runs=%d warmup=%d pipeline_depth=%d\n", model_path, input_size,
-            num_runs, warmup, pipeline_depth);
-    if (!input_shape.empty()) {
-        std::string shape_str = "[";
-        for (size_t i = 0; i < input_shape.size(); i++)
-            shape_str += std::to_string(input_shape[i]) + (i + 1 < input_shape.size() ? "," : "");
-        shape_str += "]";
-        fprintf(stderr, "[config] input_shape=%s\n", shape_str.c_str());
+    fprintf(stderr, "[config] models=%zu runs=%d warmup=%d pipeline_depth=%d from_memory=%d\n", num_models, num_runs,
+            warmup_runs, pipeline_depth, (int)from_memory);
+    std::vector<Model> models(num_models);
+    for (size_t m = 0; m < num_models; m++) {
+        Model &model = models[m];
+        model.path = model_paths[m];
+        model.name = file_stem(model.path);
+        model.input_size = input_sizes[m];
+        if (!input_shapes.empty()) model.shape = input_shapes[m];
+        if (!image_paths.empty()) {
+            if (!read_file(image_paths[m], model.image) || model.image.size() != model.input_size) {
+                fprintf(stderr, "Error: cannot read %zu bytes of input from %s\n", model.input_size, image_paths[m]);
+                return 1;
+            }
+        }
+        model.family = yolo::detect_family(model.name);
+        fprintf(stderr, "[config] model[%zu]=%s input_size=%zu input_shape=%s image=%s%s\n", m, model.path,
+                model.input_size, shape_str(model.shape.data(), (int)model.shape.size()).c_str(),
+                image_paths.empty() ? "(zeros)" : image_paths[m],
+                model.family != yolo::Family::UNKNOWN ? " (YOLO post-processing)" : "");
     }
-
-    // Derive model name early so we can detect the YOLO family before warmup
-    std::string path_str_early(model_path);
-    size_t slash_early = path_str_early.rfind('/');
-    std::string model_name_early =
-        (slash_early == std::string::npos) ? path_str_early : path_str_early.substr(slash_early + 1);
-    size_t dot_early = model_name_early.rfind('.');
-    if (dot_early != std::string::npos) model_name_early = model_name_early.substr(0, dot_early);
-
-    yolo::Family yolo_family = yolo::detect_family(model_name_early);
-    if (yolo_family != yolo::Family::UNKNOWN)
-        fprintf(stderr, "[postprocess] detected YOLO family for model '%s'\n", model_name_early.c_str());
 
     Config cfg = {0, nullptr, nullptr};
-    RuntimeStatus s = runtime_init(cfg);
-    if (s != RUNTIME_STATUS_SUCCESS) {
+    if (runtime_init(cfg) != RUNTIME_STATUS_SUCCESS) {
         fprintf(stderr, "runtime_init failed: %s\n", runtime_get_error());
         return 1;
     }
-    fprintf(stderr, "[init] runtime initialized\n");
-
-    ModelConfig mc{};
-    mc.file_path = model_path;
-    mc.config = cfg;
-    s = runtime_load_models(1, &mc);
-    if (s != RUNTIME_STATUS_SUCCESS) {
-        fprintf(stderr, "runtime_load_models failed: %s\n", runtime_get_error());
+    if (!load_models(models, from_memory)) {
         runtime_cleanup();
         return 1;
     }
-    fprintf(stderr, "[init] model loaded: %s\n", model_path);
+    fprintf(stderr, "[init] %zu model(s) loaded\n", num_models);
 
-    // Print input tensor metadata once (zeros are fine here — only for shape logging)
-    {
-        Tensors *inp = make_input(input_size, input_shape);
-        if (inp) {
-            fprintf(stderr, "[input tensor] num_tensors=%d\n", inp->num_tensors);
-            for (int i = 0; i < inp->num_tensors; i++) {
-                const TensorDescriptor &td = inp->tensors[i];
-                std::string shape_str = "[";
-                for (int j = 0; j < td.rank; j++)
-                    shape_str += std::to_string(td.shape[j]) + (j + 1 < td.rank ? "," : "");
-                shape_str += "]";
-                fprintf(stderr, "[input tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n", i,
-                        td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
-            }
-            free_tensors(inp);
-            g_request_id = 0;
-        }
-    }
-
-    // Load test image into a shared buffer (reused across all runs)
-    std::vector<uint8_t> image_data;
-    if (image_path) {
-        FILE *f = fopen(image_path, "rb");
-        if (!f) {
-            fprintf(stderr, "Error: cannot open image file: %s\n", image_path);
-            runtime_cleanup();
-            return 1;
-        }
-        fseek(f, 0, SEEK_END);
-        size_t file_size = (size_t)ftell(f);
-        rewind(f);
-        if (file_size != input_size) {
-            fprintf(stderr, "Error: image file size %zu != input_size %zu\n", file_size, input_size);
-            fclose(f);
-            runtime_cleanup();
-            return 1;
-        }
-        image_data.resize(file_size);
-        if (fread(image_data.data(), 1, file_size, f) != file_size) {
-            fprintf(stderr, "Error: failed to read image file: %s\n", image_path);
-            fclose(f);
-            runtime_cleanup();
-            return 1;
-        }
-        fclose(f);
-        fprintf(stderr, "[image] loaded %zu bytes from %s\n", file_size, image_path);
-    }
-
-    // Warmup: sequential so hardware is in a stable state before pipelined timing
-    const uint8_t *img_buf = image_data.empty() ? nullptr : image_data.data();
-
-    fprintf(stderr, "[warmup] starting %d warmup run(s)\n", warmup);
-    for (int i = 0; i < warmup; i++) {
-        Tensors *inp = make_input(input_size, input_shape, img_buf);
-        if (!inp) {
-            fprintf(stderr, "[warmup] OOM at run %d/%d\n", i + 1, warmup);
-            runtime_cleanup();
-            return 1;
-        }
-        if (runtime_enqueue_input(0, inp) != RUNTIME_STATUS_SUCCESS) {
-            fprintf(stderr, "[warmup] enqueue failed at run %d/%d: %s\n", i + 1, warmup, runtime_get_error());
-            free_tensors(inp);
-            runtime_cleanup();
-            return 1;
-        }
-        int out_model = -1;
-        Tensors *out = nullptr;
-        if (runtime_retrieve_output(&out_model, &out, -1) != RUNTIME_STATUS_SUCCESS) {
-            fprintf(stderr, "[warmup] retrieve failed at run %d/%d: %s\n", i + 1, warmup, runtime_get_error());
-            free_tensors(out);
-            runtime_cleanup();
-            return 1;
-        }
-        if (out_model != 0)
-            fprintf(stderr, "[warmup] unexpected out_model=%d at run %d/%d\n", out_model, i + 1, warmup);
-        // Log output tensor metadata and run post-processing on first warmup output
-        if (i == 0 && out) {
-            fprintf(stderr, "[output tensor] num_tensors=%d\n", out->num_tensors);
-            for (int j = 0; j < out->num_tensors; j++) {
-                const TensorDescriptor &td = out->tensors[j];
-                std::string shape_str = "[";
-                for (int k = 0; k < td.rank; k++)
-                    shape_str += std::to_string(td.shape[k]) + (k + 1 < td.rank ? "," : "");
-                shape_str += "]";
-                fprintf(stderr, "[output tensor] [%d] name=%s data_type=%d rank=%d shape=%s data_size=%zu\n", j,
-                        td.name ? td.name : "(null)", (int)td.data_type, td.rank, shape_str.c_str(), td.data_size);
-            }
-
-            if (yolo_family != yolo::Family::UNKNOWN) {
-                auto dets = yolo::postprocess(out, yolo_family);
-                yolo::log_detections(dets, model_name_early.c_str());
-            }
-        }
-        free_tensors(out);
+    fprintf(stderr, "[warmup] starting %d warmup run(s) per model\n", warmup_runs);
+    if (!warmup(models, warmup_runs)) {
+        runtime_cleanup();
+        return 1;
     }
     fprintf(stderr, "[warmup] done\n");
-    g_request_id = 0;
 
     // Pipelined timed runs: producer and consumer run concurrently.
-    // The semaphore limits in-flight requests to pipeline_depth.
-    fprintf(stderr, "[bench] starting %d timed run(s) with pipeline_depth=%d\n", num_runs, pipeline_depth);
-    Semaphore sem(pipeline_depth);
-    SharedState state;
+    fprintf(stderr, "[bench] starting %d timed run(s) per model with pipeline_depth=%d\n", num_runs, pipeline_depth);
+    SharedState state(num_models, (size_t)num_runs * num_models);
 
-    auto wall_start = std::chrono::high_resolution_clock::now();
-
-    std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape), std::ref(sem), std::ref(state),
-                         img_buf);
-    std::thread consumer(consumer_thread, std::ref(sem), std::ref(state));
-
+    const Clock::time_point wall_start = Clock::now();
+    std::thread producer(producer_thread, std::cref(models), num_runs, pipeline_depth, std::ref(state));
+    std::thread consumer(consumer_thread, std::ref(state));
     producer.join();
     consumer.join();
-
-    auto wall_end = std::chrono::high_resolution_clock::now();
+    const double wall_ms = std::chrono::duration<double, std::milli>(Clock::now() - wall_start).count();
 
     runtime_cleanup();
 
@@ -473,31 +469,22 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::vector<double> &latencies_ms = state.latencies_ms;
-    double wall_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
-    double throughput_fps = (wall_ms > 0) ? (num_runs * 1000.0 / wall_ms) : 0.0;
-
-    double avg = std::accumulate(latencies_ms.begin(), latencies_ms.end(), 0.0) / latencies_ms.size();
-    double p50 = percentile(latencies_ms, 50.0);
-    double p95 = percentile(latencies_ms, 95.0);
-    double min_ms = *std::min_element(latencies_ms.begin(), latencies_ms.end());
-    double max_ms = *std::max_element(latencies_ms.begin(), latencies_ms.end());
-
-    std::string path_str(model_path);
-    size_t slash = path_str.rfind('/');
-    std::string model_name = (slash == std::string::npos) ? path_str : path_str.substr(slash + 1);
-    size_t dot = model_name.rfind('.');
-    if (dot != std::string::npos) model_name = model_name.substr(0, dot);
-
-    if (csv_mode) {
-        printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n", model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms,
-               throughput_fps);
-    } else {
-        printf(
-            "model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
-            "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
-            model_name.c_str(), num_runs, avg, p50, p95, min_ms, max_ms, throughput_fps);
+    const double throughput_fps = (wall_ms > 0) ? (num_runs * 1000.0 / wall_ms) : 0.0;
+    for (size_t m = 0; m < num_models; m++) {
+        std::vector<double> &lat = state.latencies_ms[m];
+        double avg = std::accumulate(lat.begin(), lat.end(), 0.0) / lat.size();
+        double p50 = percentile(lat, 50.0);  // sorts lat, so min/max are its ends
+        double p95 = percentile(lat, 95.0);
+        const char *name = models[m].name.c_str();
+        if (csv_mode) {
+            printf("%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n", name, num_runs, avg, p50, p95, lat.front(), lat.back(),
+                   throughput_fps);
+        } else {
+            printf(
+                "model=%s runs=%d avg_ms=%.3f p50_ms=%.3f p95_ms=%.3f "
+                "min_ms=%.3f max_ms=%.3f throughput_fps=%.1f\n",
+                name, num_runs, avg, p50, p95, lat.front(), lat.back(), throughput_fps);
+        }
     }
-
     return 0;
 }
