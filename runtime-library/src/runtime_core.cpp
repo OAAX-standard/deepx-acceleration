@@ -60,7 +60,12 @@
 
 namespace {
 
+struct ModelContext;
+
 struct JobData {
+    // Keeps the model's context (and so its output pool) alive until the job is
+    // retrieved or drained, even if runtime_cleanup unloads the model meanwhile.
+    std::shared_ptr<ModelContext> ctx;
     int model_id;
     int request_id;
     Tensors *input_tensors;  // caller's input; owned here, freed in completion callback
@@ -111,6 +116,12 @@ public:
         cv_.notify_all();
     }
 
+    // Drops the tokens of jobs that were drained instead of retrieved.
+    void reset() {
+        std::lock_guard<std::mutex> lk(m_);
+        count_ = 0;
+    }
+
 private:
     std::mutex m_;
     std::condition_variable cv_;
@@ -136,7 +147,7 @@ std::shared_ptr<spdlog::logger> g_logger;
 std::atomic<bool> g_initialized{false};
 std::atomic<bool> g_shutting_down{false};
 
-std::vector<std::unique_ptr<ModelContext>> g_models;
+std::vector<std::shared_ptr<ModelContext>> g_models;
 std::mutex g_models_mtx;
 
 // Serializes runtime_load_models and runtime_cleanup, so a load either
@@ -467,7 +478,7 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
     // All-or-nothing: build every model into a local list first.  On failure
     // the list's destructor unloads what was built (engine destructors join
     // DX-RT's threads), so nothing is published.
-    std::vector<std::unique_ptr<ModelContext>> models;
+    std::vector<std::shared_ptr<ModelContext>> models;
     int index = 0;
     try {
         for (; index < num_models; ++index) {
@@ -502,7 +513,7 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         return RUNTIME_STATUS_INVALID_TENSOR;
     }
 
-    ModelContext *ctx = nullptr;
+    std::shared_ptr<ModelContext> ctx;
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         if (g_models.empty()) {
@@ -513,7 +524,7 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
             set_error("Invalid model_id");
             return RUNTIME_STATUS_INVALID_MODEL_ID;
         }
-        ctx = g_models[model_id].get();
+        ctx = g_models[model_id];
     }
 
     // Validate input size against the model's expected input before taking any
@@ -548,6 +559,7 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     void *input_data = input_tensors->tensors[0].data;
 
     auto jd = std::unique_ptr<JobData>(new JobData());
+    jd->ctx = ctx;
     jd->model_id = model_id;
     jd->request_id = input_tensors->id;
     jd->input_tensors = input_tensors;
@@ -603,23 +615,11 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
         std::this_thread::yield();
     }
 
-    ModelContext *ctx = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(g_models_mtx);
-        if (jd->model_id < 0 || static_cast<size_t>(jd->model_id) >= g_models.size()) {
-            // Should not happen unless cleanup races with retrieve.
-            delete jd;
-            set_error("Stale model_id in output");
-            return RUNTIME_STATUS_ERROR;
-        }
-        ctx = g_models[jd->model_id].get();
-    }
-
-    Tensors *result = build_output_tensors(*ctx, jd->request_id, jd->dxrt_outputs);
+    Tensors *result = build_output_tensors(*jd->ctx, jd->request_id, jd->dxrt_outputs);
 
     // Return the output buffer to its pool regardless of build outcome.  The
     // input was already freed in the completion callback (zero-copy path).
-    ctx->output_pool->release(jd->outputs_ptr);
+    jd->ctx->output_pool->release(jd->outputs_ptr);
     const int mid = jd->model_id;
     delete jd;
 
@@ -659,19 +659,16 @@ RuntimeStatus runtime_cleanup(void) {
         }
     }
 
-    // 3) Drain any outputs that arrived between in_flight==0 and engine reset.
-    //    (Callbacks decrement in_flight last, so the queue push happened first.)
+    // 3) Free the outputs nobody retrieved.  (Callbacks decrement in_flight
+    //    last, so every completed job is already in the queue.)
     {
-        std::lock_guard<std::mutex> mlk(g_models_mtx);
         JobData *jd = nullptr;
         while (g_output_queue.try_dequeue(jd)) {
             if (jd->input_tensors) deep_free_tensors(jd->input_tensors);
-            if (jd->model_id >= 0 && static_cast<size_t>(jd->model_id) < g_models.size()) {
-                auto &ctx = g_models[jd->model_id];
-                if (ctx->output_pool) ctx->output_pool->release(jd->outputs_ptr);
-            }
+            jd->ctx->output_pool->release(jd->outputs_ptr);
             delete jd;
         }
+        g_output_sem.reset();
     }
 
     // 4) Shutdown + free pools, then destroy contexts.
@@ -683,8 +680,9 @@ RuntimeStatus runtime_cleanup(void) {
         g_models.clear();
     }
 
+    // g_shutting_down stays set until the next runtime_init, so a retriever
+    // still holding a token of a drained job gives up instead of spinning.
     g_initialized.store(false);
-    g_shutting_down.store(false);
     {
         std::lock_guard<std::mutex> lk(g_error_mtx);
         g_last_error.clear();
@@ -717,7 +715,6 @@ const char *runtime_get_info(void) {
     if (!g_initialized.load()) return nullptr;
 
     size_t loaded = 0;
-    size_t in_flight = 0;
     size_t pool_in_use = 0;
     size_t pool_size = 0;
     size_t pool_capacity = 0;
@@ -725,7 +722,6 @@ const char *runtime_get_info(void) {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         loaded = g_models.size();
         for (auto &ctx : g_models) {
-            in_flight += ctx->in_flight.load();
             if (ctx->output_pool) {
                 pool_in_use += ctx->output_pool->in_use();
                 pool_size += ctx->output_pool->allocated();
@@ -737,12 +733,14 @@ const char *runtime_get_info(void) {
     // needed) for a concurrently-mutated lock-free queue.
     size_t queued = g_output_queue.size_approx();
 
+    // A request holds its output buffer from enqueue until it is retrieved, so
+    // requests_in_flight (accepted, not yet retrieved) is pool_in_use.
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "{\"loaded_models\": %zu, \"requests_in_flight\": %zu, "
                   "\"output_queue\": %zu, \"pool_in_use\": %zu, "
                   "\"pool_size\": %zu, \"pool_capacity\": %zu}",
-                  loaded, in_flight, queued, pool_in_use, pool_size, pool_capacity);
+                  loaded, pool_in_use, queued, pool_in_use, pool_size, pool_capacity);
     // Per-thread storage so concurrent callers don't overwrite each other's string.
     static thread_local std::string info_json;
     info_json = buf;

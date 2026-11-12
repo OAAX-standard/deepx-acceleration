@@ -1,8 +1,10 @@
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -86,6 +88,16 @@ static std::vector<unsigned char> first_output_byte_per_model(int n) {
         free_output(output);
     }
     return bytes;
+}
+
+// Returns f's result, or fails the test (instead of hanging it) if f is not ready within timeout_ms.
+template <typename T>
+static T get_within(std::future<T> &f, int timeout_ms, const char *what) {
+    if (f.wait_for(std::chrono::milliseconds(timeout_ms)) != std::future_status::ready) {
+        fprintf(stderr, "  FAILED: %s did not finish within %d ms\n", what, timeout_ms);
+        abort();
+    }
+    return f.get();
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +709,160 @@ static void test_load_exception_rolls_back() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 15: Concurrent inference on several models
+// ---------------------------------------------------------------------------
+
+// Producers on several threads share two models; every request is answered exactly once, by its own model.
+static void test_concurrent_producers_two_models() {
+    printf("=== test_concurrent_producers_two_models ===\n");
+
+    const int kProducers = 4;
+    const int kPerProducer = 25;
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+
+    // Request id t*100+k goes to model k%2.
+    std::vector<std::thread> producers;
+    for (int t = 0; t < kProducers; t++) {
+        producers.emplace_back([=]() {
+            for (int k = 0; k < kPerProducer; k++) {
+                Tensors *input = make_input(t * 100 + k);
+                RuntimeStatus s;
+                while ((s = runtime_enqueue_input(k % 2, input)) == RUNTIME_STATUS_TIMEOUT) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                assert(s == RUNTIME_STATUS_SUCCESS);
+            }
+        });
+    }
+
+    std::vector<int> times_seen(kProducers * 100, 0);
+    std::thread consumer([&]() {
+        for (int i = 0; i < kProducers * kPerProducer; i++) {
+            int mid = -1;
+            Tensors *output = nullptr;
+            assert(runtime_retrieve_output(&mid, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+            const int id = output->id;
+            assert(id >= 0 && id / 100 < kProducers && id % 100 < kPerProducer);
+            assert(times_seen[id]++ == 0);
+            assert(mid == (id % 100) % 2);
+            free_output(output);
+        }
+    });
+
+    for (auto &p : producers) p.join();
+    consumer.join();
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// A full output pool on one model does not block another model.
+static void test_backpressure_isolated() {
+    printf("=== test_backpressure_isolated ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+
+    // Fill model 0's pool: capacity = dxrt_get_task_max_load() x mock device count (2).
+    const int capacity = dxrt_get_task_max_load() * 2;
+    int accepted = 0;
+    for (int i = 0; i <= capacity; i++) {
+        Tensors *input = make_input(i);
+        const RuntimeStatus s = runtime_enqueue_input(0, input);
+        if (s == RUNTIME_STATUS_TIMEOUT) {
+            free_output(input);  // caller keeps ownership on failure
+            break;
+        }
+        assert(s == RUNTIME_STATUS_SUCCESS);
+        accepted++;
+    }
+    assert(accepted == capacity);
+
+    assert(runtime_enqueue_input(1, make_input(1000)) == RUNTIME_STATUS_SUCCESS);
+
+    for (int i = 0; i < accepted + 1; i++) {
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        free_output(output);
+    }
+    assert(runtime_enqueue_input(0, make_input(1001)) == RUNTIME_STATUS_SUCCESS);
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// requests_in_flight counts requests accepted but not yet retrieved, including completed ones.
+static void test_info_counts_unretrieved() {
+    printf("=== test_info_counts_unretrieved ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    for (int i = 0; i < 3; i++) assert(runtime_enqueue_input(0, make_input(i)) == RUNTIME_STATUS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // mock completes within 15 ms
+    assert(strstr(runtime_get_info(), "\"requests_in_flight\": 3") != nullptr);
+
+    for (int i = 0; i < 3; i++) {
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        free_output(output);
+    }
+    assert(strstr(runtime_get_info(), "\"requests_in_flight\": 0") != nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// Cleanup with requests pending on several models releases a thread blocked in retrieve_output(-1).
+static void test_cleanup_multi_model_wakes_retriever() {
+    printf("=== test_cleanup_multi_model_wakes_retriever ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+
+    for (int i = 0; i < 10; i++) {
+        for (int m = 0; m < 2; m++) assert(runtime_enqueue_input(m, make_input(m * 10 + i)) == RUNTIME_STATUS_SUCCESS);
+    }
+    // Takes outputs until the runtime stops handing them out; cleanup frees the rest.
+    std::future<RuntimeStatus> retriever = std::async(std::launch::async, []() {
+        int mid = -1;
+        Tensors *output = nullptr;
+        RuntimeStatus s;
+        while ((s = runtime_retrieve_output(&mid, &output, -1)) == RUNTIME_STATUS_SUCCESS) free_output(output);
+        return s;
+    });
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    const RuntimeStatus s = get_within(retriever, 5000, "retriever after cleanup");
+    assert(s == RUNTIME_STATUS_NO_OUTPUT_AVAILABLE || s == RUNTIME_STATUS_NOT_INITIALIZED);
+
+    // The next session starts empty: nothing left over from the outputs cleanup freed.
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+    std::future<RuntimeStatus> poll = std::async(std::launch::async, []() {
+        Tensors *output = nullptr;
+        return runtime_retrieve_output(nullptr, &output, 0);
+    });
+    assert(get_within(poll, 1000, "retrieve_output(timeout 0) after re-init") == RUNTIME_STATUS_NO_OUTPUT_AVAILABLE);
+    first_output_byte_per_model(2);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -732,6 +898,10 @@ int main() {
     test_second_load_rejected();
     test_failed_load_rolls_back();
     test_load_exception_rolls_back();
+    test_concurrent_producers_two_models();
+    test_backpressure_isolated();
+    test_info_counts_unretrieved();
+    test_cleanup_multi_model_wakes_retriever();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");
