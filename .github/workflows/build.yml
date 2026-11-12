@@ -76,6 +76,26 @@ jobs:
           pip install pytest
           pytest tests/test_models.py
 
+  # The same mock DX-RT unit tests built with MSVC, so Windows-only breakage shows up without the DX-RT SDK.
+  unit-tests-windows:
+    timeout-minutes: 15
+    runs-on: windows-2022  # provides the Visual Studio 2022 generator used below
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Runtime unit tests (mock DX-RT, MSVC)
+        shell: pwsh
+        run: |
+          cmake -S runtime-library/test -B build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --config Debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          build\Debug\test_runtime.exe
+
   build-runtime-ubuntu:
     timeout-minutes: 20
     runs-on: ubuntu-latest
@@ -269,12 +289,13 @@ jobs:
     name: Publish to the OAAX bucket
     timeout-minutes: 45
     runs-on: ubuntu-22.04
-    needs: [unit-tests, build-toolchain, build-runtime-ubuntu, build-runtime-windows, integration-tests]
+    needs: [unit-tests, unit-tests-windows, build-toolchain, build-runtime-ubuntu, build-runtime-windows, integration-tests]
     # integration-tests (opt-in) and build-runtime-windows (disabled) are skipped, which would skip this job by default.
     # build-toolchain is skipped for PRs from forks: nothing to publish there.
     if: >-
       ${{ always()
       && needs.unit-tests.result == 'success'
+      && needs.unit-tests-windows.result == 'success'
       && needs.build-toolchain.result == 'success'
       && needs.build-runtime-ubuntu.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.build-runtime-windows.result)

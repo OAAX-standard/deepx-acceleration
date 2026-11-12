@@ -534,7 +534,8 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
         OutputInfo info;
         info.name = tensor.name();
         info.data_type = map_data_type(tensor.type());
-        info.shape.assign(tensor.shape().begin(), tensor.shape().end());
+        // DX-RT shapes are int64; OAAX TensorDescriptor::shape is int.
+        for (const int64_t dim : tensor.shape()) info.shape.push_back(static_cast<int>(dim));
         info.size = tensor.size_in_bytes();
         info.offset = ctx->engine->GetOutputTensorOffset(info.name);
         ctx->outputs.push_back(std::move(info));

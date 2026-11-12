@@ -100,7 +100,7 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `build.yml` | push/PR to `main`, `v*` tag | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24; the Windows x86_64 job is disabled with `if: false` until Windows is supported); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner); then `publish` (see below) |
+| `build.yml` | push/PR to `main`, `v*` tag | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`) and `unit-tests-windows` (the same mock tests with MSVC); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24; the Windows x86_64 job is disabled with `if: false` until Windows is supported); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner); then `publish` (see below) |
 | `lint.yml` | push/PR to `main` | Runs pre-commit hooks (ruff, clang-format, shellcheck, hadolint) |
 | `delete-temporary-artifacts.yml` | PR closed | Removes the PR's `<branch>/` artifacts from S3 (never a release-looking name) |
 
