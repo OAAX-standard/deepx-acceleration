@@ -455,13 +455,14 @@ static void test_scalar_output() {
     ModelConfig mc{};
     mc.file_path = "dummy.dxnn";
     mc.config = cfg;
-    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    dxrt::scalar_output().store(true);  // output shapes are read when the model loads
+    RuntimeStatus s = runtime_load_models(1, &mc);
+    dxrt::scalar_output().store(false);
+    assert(s == RUNTIME_STATUS_SUCCESS);
 
-    dxrt::scalar_output().store(true);
     assert(runtime_enqueue_input(0, make_input(7)) == RUNTIME_STATUS_SUCCESS);
     Tensors *output = nullptr;
-    RuntimeStatus s = runtime_retrieve_output(nullptr, &output, 1000);
-    dxrt::scalar_output().store(false);
+    s = runtime_retrieve_output(nullptr, &output, 1000);
 
     assert(s == RUNTIME_STATUS_SUCCESS);
     assert(output != nullptr && output->id == 7);
@@ -1162,6 +1163,28 @@ static void test_device_failure_answered() {
     printf("  PASSED\n");
 }
 
+// DX-RT's output tensors are valid only during the completion callback; every output byte
+// retrieved later is still the model's.
+static void test_output_outlives_callback() {
+    printf("=== test_output_outlives_callback ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    const std::vector<unsigned char> blob = make_model_blob(0x5A);
+    ModelConfig mc = memory_model(blob);
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    assert(runtime_enqueue_input(0, make_input(3)) == RUNTIME_STATUS_SUCCESS);
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+    const unsigned char *data = (const unsigned char *)output->tensors[0].data;
+    for (size_t i = 0; i < output->tensors[0].data_size; i++) assert(data[i] == 0x5A);
+    free_output(output);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1212,6 +1235,7 @@ int main() {
     test_last_error_is_per_thread();
     test_pending_fifo_order();
     test_device_failure_answered();
+    test_output_outlives_callback();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

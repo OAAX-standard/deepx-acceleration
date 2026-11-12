@@ -23,6 +23,11 @@
 //     pooled inputs because fresh pointers hit DMA errno=-70 (WRITE_INPUT) after
 //     ~10 runs on a fast model.  Re-validate on hardware (10k pipelined runs of
 //     squeezenet1_1) after any DX-RT upgrade.
+//   - DX-RT's output tensors are valid only during the completion callback.
+//     DX-RT writes them into the job's output buffer (the RunAsync output
+//     pointer) before the callback; the callback copies any tensor found
+//     elsewhere into that buffer and keeps no tensor pointer.  Output names,
+//     shapes and types are read from the engine when the model loads.
 //   - Each model has its own output buffer pool, grown lazily up to
 //     dxrt_get_task_max_load() × NumDevice buffers of that model's output
 //     size, matching DX-RT's own in-flight limit.  It caps memory without
@@ -97,9 +102,8 @@ struct JobData {
     std::shared_ptr<ModelContext> ctx;
     int request_id{0};
     Tensors *input_tensors{nullptr};  // caller's input; owned here, freed in completion callback
-    void *outputs_ptr{nullptr};       // set when the job is submitted
-    dxrt::TensorPtrs dxrt_outputs;
-    bool failed{false};  // DX-RT rejected or failed the job; `error` says why
+    void *outputs_ptr{nullptr};       // set when submitted; holds the outputs once completed
+    bool failed{false};               // DX-RT rejected or failed the job; `error` says why
     std::string error;
 };
 
@@ -158,10 +162,19 @@ private:
     long count_{0};
 };
 
+// An output tensor of a model, as the engine describes it when the model loads.
+struct OutputInfo {
+    std::string name;
+    TensorElementType data_type{DATA_TYPE_UNDEFINED};
+    std::vector<int> shape;
+    size_t size{0};    // bytes
+    size_t offset{0};  // position in a job's output buffer
+};
+
 struct ModelContext {
     int model_id{0};
     std::unique_ptr<dxrt::InferenceEngine> engine;
-    std::vector<uint64_t> output_sizes;
+    std::vector<OutputInfo> outputs;
     size_t input_size{0};
     std::unique_ptr<BufferPool> output_pool;
 
@@ -290,8 +303,10 @@ TensorElementType map_data_type(dxrt::DataType dtype) {
     }
 }
 
-Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const dxrt::TensorPtrs &outputs) {
-    const int num = static_cast<int>(outputs.size());
+// Copies a completed job's outputs from its output buffer into a new Tensors
+// owned by the caller.  Returns nullptr if out of memory.
+Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const void *outputs_ptr) {
+    const int num = static_cast<int>(ctx.outputs.size());
     Tensors *t = static_cast<Tensors *>(std::malloc(sizeof(Tensors)));
     if (!t) return nullptr;
     t->id = request_id;
@@ -303,28 +318,22 @@ Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const dxr
     }
 
     for (int i = 0; i < num; ++i) {
-        const auto &src = outputs[i];
-        const auto name = src->name();
-        const auto shape = src->shape();
-        const auto dtype = src->type();
-        const size_t size = ctx.output_sizes[i];
-
-        t->tensors[i].name = strdup(name.c_str());
-        t->tensors[i].data_type = map_data_type(dtype);
-        t->tensors[i].rank = static_cast<int>(shape.size());
+        const OutputInfo &info = ctx.outputs[i];
+        TensorDescriptor &dst = t->tensors[i];
+        dst.name = strdup(info.name.c_str());
+        dst.data_type = info.data_type;
+        dst.rank = static_cast<int>(info.shape.size());
         // malloc(0) may return NULL, which would be mistaken for OOM on rank-0 (scalar) outputs.
-        t->tensors[i].shape = static_cast<int *>(std::malloc(std::max<size_t>(shape.size(), 1) * sizeof(int)));
-        t->tensors[i].data_size = size;
-        t->tensors[i].data = std::malloc(size);
+        dst.shape = static_cast<int *>(std::malloc(std::max<size_t>(info.shape.size(), 1) * sizeof(int)));
+        dst.data_size = info.size;
+        dst.data = std::malloc(info.size);
 
-        if (!t->tensors[i].name || !t->tensors[i].shape || !t->tensors[i].data) {
+        if (!dst.name || !dst.shape || !dst.data) {
             deep_free_tensors(t);
             return nullptr;
         }
-        for (size_t j = 0; j < shape.size(); ++j) {
-            t->tensors[i].shape[j] = static_cast<int>(shape[j]);
-        }
-        std::memcpy(t->tensors[i].data, src->data(), size);
+        std::copy(info.shape.begin(), info.shape.end(), dst.shape);
+        std::memcpy(dst.data, static_cast<const uint8_t *>(outputs_ptr) + info.offset, info.size);
     }
     return t;
 }
@@ -458,6 +467,23 @@ void release_output(ModelContext &ctx, void *buffer) {
     }
 }
 
+// Puts a completed job's outputs into its output buffer, where they stay valid
+// after the callback (DX-RT's tensors do not).  DX-RT normally wrote them there
+// already.  Returns false if `outputs` does not match the model: DX-RT
+// delivers a job that failed on the device with zero tensors.
+bool store_outputs(const ModelContext &ctx, const dxrt::TensorPtrs &outputs, void *buffer) noexcept {
+    if (outputs.size() != ctx.outputs.size()) return false;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const OutputInfo &info = ctx.outputs[i];
+        void *dst = static_cast<uint8_t *>(buffer) + info.offset;
+        const void *src = outputs[i]->data();
+        if (src == dst) continue;
+        if (!src || outputs[i]->size_in_bytes() < info.size) return false;
+        std::memcpy(dst, src, info.size);
+    }
+    return true;
+}
+
 // Builds the context (engine, output pool, completion callback) for the model
 // at `index` of runtime_load_models' list.  The model is read from model_data
 // when set (file_path then only names it in the log), otherwise from
@@ -496,9 +522,17 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
         return model_error(index, RUNTIME_STATUS_INVALID_MODEL, "Failed to load model: ", e.what());
     }
 
-    ctx->output_sizes = ctx->engine->GetOutputTensorSizes();
     ctx->input_size = ctx->engine->GetInputSize();
     const uint64_t output_total = ctx->engine->GetOutputSize();
+    for (const dxrt::Tensor &tensor : ctx->engine->GetOutputs()) {
+        OutputInfo info;
+        info.name = tensor.name();
+        info.data_type = map_data_type(tensor.type());
+        info.shape.assign(tensor.shape().begin(), tensor.shape().end());
+        info.size = tensor.size_in_bytes();
+        info.offset = ctx->engine->GetOutputTensorOffset(info.name);
+        ctx->outputs.push_back(std::move(info));
+    }
 
     const size_t cap = compute_pool_capacity();
     ctx->output_pool.reset(new BufferPool(output_total, cap));
@@ -511,12 +545,7 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
     ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
         auto *jd = static_cast<JobData *>(userArg);
         if (jd) {
-            // DX-RT delivers a job that failed on the device with zero tensors.
-            if (outputs.size() == ctx_raw->output_sizes.size()) {
-                jd->dxrt_outputs = outputs;
-            } else {
-                fail_job(jd, "failed in DX-RT");
-            }
+            if (!store_outputs(*ctx_raw, outputs, jd->outputs_ptr)) fail_job(jd, "failed in DX-RT");
             // Inference is complete, so DX-RT's asynchronous input encoding
             // has already read the caller's input.  Release it now (zero-copy
             // path: nothing was copied at enqueue time).
@@ -763,7 +792,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     if (job->failed) {
         deep_free_tensors(job->input_tensors);  // still set if it never reached DX-RT
     } else {
-        result = build_output_tensors(*job->ctx, job->request_id, job->dxrt_outputs);
+        result = build_output_tensors(*job->ctx, job->request_id, job->outputs_ptr);
     }
 
     // Hand the output buffer on regardless of the outcome.  A completed job's

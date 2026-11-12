@@ -4,10 +4,10 @@
 // can be unit-tested without DeepX hardware or the real libdxrt.
 // Keep it in sync with the calls made in src/runtime_core.cpp.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -70,27 +70,26 @@ inline RunAsyncLog &run_async_log() {
     return log;
 }
 
+// Non-owning view of an output tensor, like DX-RT's.
 class Tensor {
 public:
-    Tensor(size_t size, uint8_t fill) : data_buf_(malloc(size)), size_(size) {
-        if (data_buf_) memset(data_buf_, fill, size);
-    }
-    ~Tensor() { free(data_buf_); }
+    Tensor(std::vector<int64_t> shape, void *data, size_t size) : shape_(std::move(shape)), data_(data), size_(size) {}
 
-    std::string name() const { return "output_0"; }
-    std::vector<int64_t> shape() const {
-        if (scalar_output().load()) return {};
-        return {1, 3, 224, 224};
-    }
+    const std::string &name() const { return name_; }
+    const std::vector<int64_t> &shape() const { return shape_; }
     DataType type() const { return FLOAT; }
-    void *data() const { return data_buf_; }
+    void *data() { return data_; }
+    size_t size_in_bytes() const { return size_; }
 
 private:
-    void *data_buf_;
+    std::string name_{"output_0"};
+    std::vector<int64_t> shape_;
+    void *data_;
     size_t size_;
 };
 
 using TensorPtrs = std::vector<std::shared_ptr<Tensor>>;
+using Tensors = std::vector<Tensor>;
 
 class InferenceEngine {
 public:
@@ -114,7 +113,13 @@ public:
         for (auto &t : threads) t.join();
     }
 
-    std::vector<uint64_t> GetOutputTensorSizes() { return {1 * 3 * 224 * 224 * sizeof(float)}; }
+    // Output metadata (no data); the shape is {} while scalar_output() is set.
+    Tensors GetOutputs() {
+        std::vector<int64_t> shape;
+        if (!scalar_output().load()) shape = {1, 3, 224, 224};
+        return {Tensor(shape, nullptr, GetOutputSize())};
+    }
+    size_t GetOutputTensorOffset(const std::string &) const { return 0; }
     uint64_t GetOutputSize() { return 1 * 3 * 224 * 224 * sizeof(float); }
     uint64_t GetInputSize() { return 1 * 3 * 224 * 224 * sizeof(float); }
 
@@ -128,7 +133,9 @@ public:
     }
 
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
-    // invokes the registered callback, like DX-RT's completion threads do.
+    // invokes the registered callback, like DX-RT's completion threads do.  The
+    // output tensors are the worker's own buffer, valid only during the callback:
+    // the worker overwrites it as soon as the callback returns.
     int RunAsync(void *input, void *userArg, void *) {
         if (take_one(run_async_failures())) throw std::runtime_error("mock: RunAsync failed");
         const bool device_failure = take_one(device_failures());
@@ -142,9 +149,13 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         threads_.emplace_back([this, job_id, userArg, device_failure]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5 + (job_id % 11)));
+            std::vector<uint8_t> buffer(GetOutputSize(), fill_);
             TensorPtrs outputs;
-            if (!device_failure) outputs.push_back(std::make_shared<Tensor>(GetOutputSize(), fill_));
+            if (!device_failure) {
+                outputs.push_back(std::make_shared<Tensor>(GetOutputs()[0].shape(), buffer.data(), buffer.size()));
+            }
             if (callback_) callback_(outputs, userArg);
+            std::fill(buffer.begin(), buffer.end(), 0xDD);  // reused for the next job
         });
         return job_id;
     }
