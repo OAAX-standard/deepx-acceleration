@@ -57,6 +57,37 @@ static void free_output(Tensors *t) {
     free(t);
 }
 
+static ModelConfig file_model(const char *path) {
+    ModelConfig mc{};
+    mc.file_path = path;
+    return mc;
+}
+
+static ModelConfig memory_model(const std::vector<unsigned char> &blob) {
+    ModelConfig mc{};
+    mc.model_data = blob.data();
+    mc.model_size = blob.size();
+    return mc;
+}
+
+// Sends one request to each of model ids 0..n-1 and returns the first output byte per model id.
+static std::vector<unsigned char> first_output_byte_per_model(int n) {
+    for (int i = 0; i < n; i++) assert(runtime_enqueue_input(i, make_input(100 + i)) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> bytes(n);
+    std::vector<bool> seen(n, false);
+    for (int i = 0; i < n; i++) {
+        int mid = -1;
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(&mid, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        assert(mid >= 0 && mid < n && !seen[mid]);
+        assert(output->id == 100 + mid);
+        seen[mid] = true;
+        bytes[mid] = ((unsigned char *)output->tensors[0].data)[0];
+        free_output(output);
+    }
+    return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Basic lifecycle
 // ---------------------------------------------------------------------------
@@ -484,8 +515,8 @@ static void test_load_from_memory() {
 }
 
 // The caller may reuse or free model_data as soon as runtime_load_models returns.
-static void test_memory_buffer_copied() {
-    printf("=== test_memory_buffer_copied ===\n");
+static void test_memory_buffer_reusable_after_load() {
+    printf("=== test_memory_buffer_reusable_after_load ===\n");
 
     Config cfg = {0, nullptr, nullptr};
     assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
@@ -543,6 +574,128 @@ static void test_invalid_model_buffer() {
     printf("  PASSED\n");
 }
 
+// When both sources are set, model_data wins and file_path only names the model.
+static void test_memory_takes_precedence_over_file() {
+    printf("=== test_memory_takes_precedence_over_file ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob = make_model_blob(0x07);
+    ModelConfig mc = memory_model(blob);
+    mc.file_path = "does_not_exist.dxnn";
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    assert(first_output_byte_per_model(1)[0] == 0x07);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Several models in one runtime_load_models call (model id = index)
+// ---------------------------------------------------------------------------
+
+static void test_load_multiple_models() {
+    printf("=== test_load_multiple_models ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob1 = make_model_blob(0x01);
+    std::vector<unsigned char> blob2 = make_model_blob(0x02);
+    ModelConfig mcs[] = {memory_model(blob1), memory_model(blob2)};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+
+    std::vector<unsigned char> bytes = first_output_byte_per_model(2);
+    assert(bytes[0] == 0x01 && bytes[1] == 0x02);
+    assert(strstr(runtime_get_info(), "\"loaded_models\": 2") != nullptr);
+
+    Tensors *input = make_input(1);
+    assert(runtime_enqueue_input(2, input) == RUNTIME_STATUS_INVALID_MODEL_ID);
+    free_output(input);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_load_same_file_twice() {
+    printf("=== test_load_same_file_twice ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+    first_output_byte_per_model(2);  // asserts each id answers on its own model id
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_mixed_sources() {
+    printf("=== test_mixed_sources ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob = make_model_blob(0x07);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), memory_model(blob)};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> bytes = first_output_byte_per_model(2);
+    assert(bytes[0] == 0x42 && bytes[1] == 0x07);  // 0x42: mock fill for file-loaded models
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_second_load_rejected() {
+    printf("=== test_second_load_rejected ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_ALREADY_INITIALIZED);
+    first_output_byte_per_model(1);  // the loaded model still answers
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// A failure on any model unloads the ones built before it; the next call starts afresh.
+static void test_failed_load_rolls_back() {
+    printf("=== test_failed_load_rolls_back ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    std::vector<unsigned char> blob = make_model_blob(0x01);
+    ModelConfig mcs[] = {memory_model(blob), file_model("does_not_exist.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_FILE_NOT_FOUND);
+    assert(strstr(runtime_get_error(), "model[1]") != nullptr);
+    assert(strstr(runtime_get_info(), "\"loaded_models\": 0") != nullptr);
+
+    assert(runtime_load_models(1, mcs) == RUNTIME_STATUS_SUCCESS);
+    assert(first_output_byte_per_model(1)[0] == 0x01);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// An exception thrown while building a model (here std::bad_alloc) is reported, not propagated.
+static void test_load_exception_rolls_back() {
+    printf("=== test_load_exception_rolls_back ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    dxrt::register_callback_throws_after().store(1);
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_OUT_OF_MEMORY);
+    assert(strstr(runtime_get_error(), "model[1]") != nullptr);
+    assert(strstr(runtime_get_info(), "\"loaded_models\": 0") != nullptr);
+
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+    first_output_byte_per_model(2);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -569,9 +722,16 @@ int main() {
     test_get_error_thread_safe();
     test_model_file_not_found();
     test_load_from_memory();
-    test_memory_buffer_copied();
+    test_memory_buffer_reusable_after_load();
     test_load_requires_source();
     test_invalid_model_buffer();
+    test_memory_takes_precedence_over_file();
+    test_load_multiple_models();
+    test_load_same_file_twice();
+    test_mixed_sources();
+    test_second_load_rejected();
+    test_failed_load_rolls_back();
+    test_load_exception_rolls_back();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

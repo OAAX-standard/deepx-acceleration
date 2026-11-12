@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -28,6 +29,13 @@ enum DataType { FLOAT, UINT8, UINT16, UINT32, UINT64, INT8, INT16, INT32, INT64 
 // Test knob: make mock outputs rank-0 (scalar), shape = {}.
 inline std::atomic<bool> &scalar_output() {
     static std::atomic<bool> v{false};
+    return v;
+}
+
+// Test knob: RegisterCallback lets this many calls through, then throws
+// std::bad_alloc once (negative = never).  Exercises load rollback.
+inline std::atomic<int> &register_callback_throws_after() {
+    static std::atomic<int> v{-1};
     return v;
 }
 
@@ -79,7 +87,14 @@ public:
     uint64_t GetOutputSize() { return 1 * 3 * 224 * 224 * sizeof(float); }
     uint64_t GetInputSize() { return 1 * 3 * 224 * 224 * sizeof(float); }
 
-    void RegisterCallback(std::function<int(TensorPtrs &, void *)> cb) { callback_ = std::move(cb); }
+    void RegisterCallback(std::function<int(TensorPtrs &, void *)> cb) {
+        const int left = register_callback_throws_after().load();
+        if (left >= 0) {
+            register_callback_throws_after().store(left - 1);
+            if (left == 0) throw std::bad_alloc();
+        }
+        callback_ = std::move(cb);
+    }
 
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
