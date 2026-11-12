@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,8 +35,8 @@ static void print_usage(const char *prog) {
             "  --pipeline-depth <N>   Requests kept in flight per model (default: 4)\n"
             "  --csv                  Print results in CSV format, one row per model\n"
             "\n"
-            "Timed requests are sent round-robin across the models; throughput_fps is each model's\n"
-            "rate while all models run together.\n"
+            "Each model has its own producer thread, so all models run concurrently. throughput_fps is\n"
+            "per model: its runs over its own window (first enqueue to last output retrieved).\n"
             "\n"
             "CSV header: model,runs,avg_ms,p50_ms,p95_ms,min_ms,max_ms,throughput_fps\n",
             prog);
@@ -138,17 +140,30 @@ static double percentile(std::vector<double> &v, double p) {
     return v[idx];
 }
 
-static std::vector<int> parse_shape(const char *s) {
-    std::vector<int> shape;
+// Parses s as a whole decimal integer in [min, max] into out; out is untouched on failure.
+template <typename T>
+static bool parse_number(const char *s, long long min, long long max, T &out) {
+    char *end = nullptr;
+    errno = 0;
+    const long long v = strtoll(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < min || v > max) return false;
+    out = (T)v;
+    return true;
+}
+
+// Parses a comma-separated list of positive dimensions, e.g. "1,224,224,3".
+static bool parse_shape(const char *s, std::vector<int> &shape) {
     std::string str(s);
     size_t pos = 0;
-    while (pos < str.size()) {
+    do {
         size_t end = str.find(',', pos);
         if (end == std::string::npos) end = str.size();
-        shape.push_back(std::stoi(str.substr(pos, end - pos)));
+        int dim = 0;
+        if (!parse_number(str.substr(pos, end - pos).c_str(), 1, INT_MAX, dim)) return false;
+        shape.push_back(dim);
         pos = end + 1;
-    }
-    return shape;
+    } while (pos <= str.size());
+    return true;
 }
 
 // Loads all models in one runtime_load_models call; model i gets model id i.
@@ -225,23 +240,31 @@ static bool warmup(const std::vector<Model> &models, int runs) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared state between producer and consumer threads
+// Shared state between the producer threads and the consumer thread
 // ---------------------------------------------------------------------------
 
-struct SharedState {
-    SharedState(size_t num_models, size_t num_requests)
-        : enqueue_times(num_requests), latencies_ms(num_models), in_flight(num_models, 0) {}
+struct ModelStats {
+    std::vector<double> latencies_ms;
+    int in_flight = 0;           // accepted, not yet retrieved
+    Clock::time_point last_out;  // when the last output of this model was retrieved
+};
 
-    // Guards everything below; cv signals a change of submitted/retired/done/error.
+struct SharedState {
+    SharedState(size_t num_models, int runs)
+        : runs(runs), enqueue_times(num_models * runs), models(num_models), active_producers((int)num_models) {}
+
+    const int runs;  // per model; model m owns request ids [m * runs, (m + 1) * runs)
+
+    // Guards everything below; cv signals a change of submitted/retired/in_flight/
+    // active_producers/error.
     std::mutex mutex;
     std::condition_variable cv;
 
-    std::vector<Clock::time_point> enqueue_times;   // indexed by request id
-    std::vector<std::vector<double>> latencies_ms;  // per model
-    std::vector<int> in_flight;                     // per model: accepted, not yet retrieved
-    int submitted = 0;                              // requests accepted by the runtime
-    int retired = 0;                                // outputs retrieved
-    bool producer_done = false;
+    std::vector<Clock::time_point> enqueue_times;  // indexed by request id
+    std::vector<ModelStats> models;
+    int submitted = 0;  // requests accepted by the runtime
+    int retired = 0;    // outputs retrieved
+    int active_producers;
     bool error = false;
 };
 
@@ -254,24 +277,23 @@ static void fail(SharedState &state) {
 }
 
 // ---------------------------------------------------------------------------
-// Producer: enqueues runs requests per model, round-robin, at most
-// pipeline_depth in flight per model
+// Producer (one per model): enqueues the model's runs requests, at most
+// pipeline_depth in flight
 // ---------------------------------------------------------------------------
 
-static void producer_thread(const std::vector<Model> &models, int runs, int pipeline_depth, SharedState &state) {
-    const int num_models = (int)models.size();
-    const int total = runs * num_models;
-    for (int id = 0; id < total; id++) {
-        const int m = id % num_models;
+static void producer_thread(const Model &model, int m, int pipeline_depth, SharedState &state) {
+    ModelStats &stats = state.models[m];
+    for (int i = 0; i < state.runs; i++) {
         {
             std::unique_lock<std::mutex> lock(state.mutex);
-            state.cv.wait(lock, [&] { return state.in_flight[m] < pipeline_depth || state.error; });
+            state.cv.wait(lock, [&] { return stats.in_flight < pipeline_depth || state.error; });
             if (state.error) break;
         }
 
-        Tensors *inp = make_input(id, models[m]);
+        const int id = m * state.runs + i;
+        Tensors *inp = make_input(id, model);
         if (!inp) {
-            fprintf(stderr, "[producer] OOM at request %d/%d\n", id + 1, total);
+            fprintf(stderr, "[producer] %s: OOM at run %d/%d\n", model.name.c_str(), i + 1, state.runs);
             fail(state);
             break;
         }
@@ -293,14 +315,14 @@ static void producer_thread(const std::vector<Model> &models, int runs, int pipe
                 if (state.error) break;
             }
             if (s == RUNTIME_STATUS_SUCCESS) {
-                state.in_flight[m]++;
+                stats.in_flight++;
                 state.submitted++;
             }
         }
         if (s != RUNTIME_STATUS_SUCCESS) {
             if (s != RUNTIME_STATUS_TIMEOUT)
-                fprintf(stderr, "[producer] %s: enqueue failed at request %d/%d: %s\n", models[m].name.c_str(), id + 1,
-                        total, runtime_get_error());
+                fprintf(stderr, "[producer] %s: enqueue failed at run %d/%d: %s\n", model.name.c_str(), i + 1,
+                        state.runs, runtime_get_error());
             free_tensors(inp);
             fail(state);
             break;
@@ -311,13 +333,13 @@ static void producer_thread(const std::vector<Model> &models, int runs, int pipe
     // Lets the consumer stop waiting for outputs that will never come.
     {
         std::lock_guard<std::mutex> lock(state.mutex);
-        state.producer_done = true;
+        state.active_producers--;
     }
     state.cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------
-// Consumer: retrieves outputs of accepted requests, records per-request latency
+// Consumer: the only thread retrieving outputs; records per-request latency
 // under the model id the runtime returns with each output
 // ---------------------------------------------------------------------------
 
@@ -325,9 +347,10 @@ static void consumer_thread(SharedState &state) {
     for (;;) {
         {
             // Retrieve only while an output is guaranteed to arrive, so the
-            // blocking retrieve below can never outlive the producer.
+            // blocking retrieve below can never outlive the producers.
             std::unique_lock<std::mutex> lock(state.mutex);
-            state.cv.wait(lock, [&] { return state.retired < state.submitted || state.producer_done || state.error; });
+            state.cv.wait(
+                lock, [&] { return state.retired < state.submitted || state.active_producers == 0 || state.error; });
             if (state.error || state.retired == state.submitted) return;
         }
 
@@ -345,14 +368,15 @@ static void consumer_thread(SharedState &state) {
 
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            if (m < 0 || (size_t)m >= state.in_flight.size() || id < 0 || (size_t)id >= state.enqueue_times.size() ||
-                id % (int)state.in_flight.size() != m) {
+            if (m < 0 || (size_t)m >= state.models.size() || id < 0 || id / state.runs != m) {
                 fprintf(stderr, "[consumer] unexpected output: model %d, request id %d\n", m, id);
                 state.error = true;
             } else {
-                state.latencies_ms[m].push_back(
+                ModelStats &stats = state.models[m];
+                stats.latencies_ms.push_back(
                     std::chrono::duration<double, std::milli>(t_out - state.enqueue_times[id]).count());
-                state.in_flight[m]--;
+                stats.last_out = t_out;
+                stats.in_flight--;
                 state.retired++;
             }
         }
@@ -375,39 +399,59 @@ int main(int argc, char **argv) {
     bool csv_mode = false;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
-            model_paths.push_back(argv[++i]);
-        } else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
-            image_paths.push_back(argv[++i]);
-        } else if (strcmp(argv[i], "--input-size") == 0 && i + 1 < argc) {
-            input_sizes.push_back((size_t)atoll(argv[++i]));
-        } else if (strcmp(argv[i], "--input-shape") == 0 && i + 1 < argc) {
-            input_shapes.push_back(parse_shape(argv[++i]));
-        } else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
-            num_runs = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
-            warmup_runs = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--pipeline-depth") == 0 && i + 1 < argc) {
-            pipeline_depth = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--from-memory") == 0) {
+        const char *opt = argv[i];
+        if (strcmp(opt, "--from-memory") == 0) {
             from_memory = true;
-        } else if (strcmp(argv[i], "--csv") == 0) {
+            continue;
+        }
+        if (strcmp(opt, "--csv") == 0) {
             csv_mode = true;
+            continue;
+        }
+
+        // Every other option takes a value.
+        const char *val = (i + 1 < argc) ? argv[++i] : nullptr;
+        bool ok = val != nullptr;
+        if (strcmp(opt, "--model") == 0) {
+            if (ok) model_paths.push_back(val);
+        } else if (strcmp(opt, "--image") == 0) {
+            if (ok) image_paths.push_back(val);
+        } else if (strcmp(opt, "--input-size") == 0) {
+            size_t size = 0;
+            ok = ok && parse_number(val, 1, LLONG_MAX, size);
+            if (ok) input_sizes.push_back(size);
+        } else if (strcmp(opt, "--input-shape") == 0) {
+            std::vector<int> shape;
+            ok = ok && parse_shape(val, shape);
+            if (ok) input_shapes.push_back(shape);
+        } else if (strcmp(opt, "--runs") == 0) {
+            ok = ok && parse_number(val, 1, INT_MAX, num_runs);
+        } else if (strcmp(opt, "--warmup") == 0) {
+            ok = ok && parse_number(val, 0, INT_MAX, warmup_runs);
+        } else if (strcmp(opt, "--pipeline-depth") == 0) {
+            ok = ok && parse_number(val, 1, INT_MAX, pipeline_depth);
         } else {
-            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            fprintf(stderr, "Unknown argument: %s\n", opt);
+            print_usage(argv[0]);
+            return 2;
+        }
+        if (!ok) {
+            fprintf(stderr, "Error: missing or invalid value for %s\n", opt);
             print_usage(argv[0]);
             return 2;
         }
     }
 
     const size_t num_models = model_paths.size();
-    const bool sizes_valid = std::find(input_sizes.begin(), input_sizes.end(), (size_t)0) == input_sizes.end();
-    if (num_models == 0 || input_sizes.size() != num_models || !sizes_valid ||
+    if (num_models == 0 || input_sizes.size() != num_models ||
         (!input_shapes.empty() && input_shapes.size() != num_models) ||
-        (!image_paths.empty() && image_paths.size() != num_models) || num_runs < 1 || warmup_runs < 0 ||
-        pipeline_depth < 1) {
-        fprintf(stderr, "Error: invalid or unpaired arguments\n");
+        (!image_paths.empty() && image_paths.size() != num_models)) {
+        fprintf(stderr, "Error: each --model needs one --input-size (and one --input-shape/--image if any is given)\n");
         print_usage(argv[0]);
+        return 2;
+    }
+    if ((long long)num_runs * num_models > INT_MAX) {  // request ids are ints
+        fprintf(stderr, "Error: --runs times the number of models exceeds %d\n", INT_MAX);
         return 2;
     }
 
@@ -451,16 +495,16 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "[warmup] done\n");
 
-    // Pipelined timed runs: producer and consumer run concurrently.
+    // Pipelined timed runs: one producer per model, one consumer for all of them.
     fprintf(stderr, "[bench] starting %d timed run(s) per model with pipeline_depth=%d\n", num_runs, pipeline_depth);
-    SharedState state(num_models, (size_t)num_runs * num_models);
-
-    const Clock::time_point wall_start = Clock::now();
-    std::thread producer(producer_thread, std::cref(models), num_runs, pipeline_depth, std::ref(state));
+    SharedState state(num_models, num_runs);
+    std::vector<std::thread> producers;
+    for (size_t m = 0; m < num_models; m++)
+        producers.push_back(
+            std::thread(producer_thread, std::cref(models[m]), (int)m, pipeline_depth, std::ref(state)));
     std::thread consumer(consumer_thread, std::ref(state));
-    producer.join();
+    for (size_t m = 0; m < num_models; m++) producers[m].join();
     consumer.join();
-    const double wall_ms = std::chrono::duration<double, std::milli>(Clock::now() - wall_start).count();
 
     runtime_cleanup();
 
@@ -469,9 +513,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const double throughput_fps = (wall_ms > 0) ? (num_runs * 1000.0 / wall_ms) : 0.0;
     for (size_t m = 0; m < num_models; m++) {
-        std::vector<double> &lat = state.latencies_ms[m];
+        ModelStats &stats = state.models[m];
+        std::vector<double> &lat = stats.latencies_ms;
+        // The model's own window, so a model starved by the others shows a lower rate.
+        const double window_ms =
+            std::chrono::duration<double, std::milli>(stats.last_out - state.enqueue_times[m * num_runs]).count();
+        double throughput_fps = (window_ms > 0) ? (num_runs * 1000.0 / window_ms) : 0.0;
         double avg = std::accumulate(lat.begin(), lat.end(), 0.0) / lat.size();
         double p50 = percentile(lat, 50.0);  // sorts lat, so min/max are its ends
         double p95 = percentile(lat, 95.0);

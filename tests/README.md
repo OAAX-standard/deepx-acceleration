@@ -171,10 +171,11 @@ Tests are skipped automatically if `inference_runner` is not built or no compile
 
 `--model` and `--input-size` (and, optionally, `--input-shape` and `--image`) are given once per model;
 the Nth of each belongs to the Nth `--model`. Several models are loaded in one `runtime_load_models`
-call and the timed requests are sent round-robin across them, with `--pipeline-depth` requests in flight
-per model. `--from-memory` reads each model file into memory, loads it from that buffer and frees the
-buffer right after loading. Output is one line (or CSV row) per model; `--runs` is per model and
-`throughput_fps` is each model's rate while all models run together. Argument errors exit with 2.
+call, and each model gets its own producer thread with `--pipeline-depth` requests in flight, so the
+models run concurrently. `--from-memory` reads each model file into memory, loads it from that buffer and
+frees the buffer right after loading. Output is one line (or CSV row) per model; `--runs` is per model and
+`throughput_fps` is that model's runs over its own window (first enqueue to last output retrieved), so a
+model starved by the others shows a lower rate. Argument errors exit with 2.
 
 ```bash
 tests/runtime/build/inference_runner \
