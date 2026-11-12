@@ -143,43 +143,30 @@ static std::vector<int> parse_shape(const char *s) {
 // ---------------------------------------------------------------------------
 
 struct SharedState {
-    // Enqueue timestamps, pushed by producer, popped on completion (FIFO).
-    // times_mutex also guards latencies_ms.
+    // Guards everything below; cv signals a change of submitted/retired/done/error.
+    std::mutex mutex;
+    std::condition_variable cv;
+
+    // Enqueue timestamps, pushed by producer, popped by consumer (FIFO)
     std::queue<std::chrono::high_resolution_clock::time_point> enqueue_times;
     std::vector<double> latencies_ms;
-    std::mutex times_mutex;
-
-    std::atomic<int> retired{0};
-    std::atomic<bool> error{false};
+    int submitted = 0;  // requests accepted by the runtime
+    int retired = 0;    // outputs retrieved
+    bool producer_done = false;
+    bool error = false;
 };
 
-// ---------------------------------------------------------------------------
-// Retrieves one output, records its latency and frees its pipeline slot.
-// Called by the consumer, and by the producer to make room when the runtime's
-// output pool is exhausted.
-// ---------------------------------------------------------------------------
+static bool has_failed(SharedState &state) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.error;
+}
 
-static bool retire_one(Semaphore &sem, SharedState &state) {
-    int out_model = -1;
-    Tensors *out = nullptr;
-    RuntimeStatus s = runtime_retrieve_output(&out_model, &out, -1);
-    auto t_out = std::chrono::high_resolution_clock::now();
-
-    free_tensors(out);
-    sem.release();
-    if (s != RUNTIME_STATUS_SUCCESS) {
-        fprintf(stderr, "[retire] retrieve failed: %s\n", runtime_get_error());
-        state.error.store(true);
-        return false;
+static void fail(SharedState &state) {
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.error = true;
     }
-    if (out_model != 0) fprintf(stderr, "[retire] unexpected out_model=%d\n", out_model);
-
-    std::lock_guard<std::mutex> lock(state.times_mutex);
-    state.latencies_ms.push_back(
-        std::chrono::duration<double, std::milli>(t_out - state.enqueue_times.front()).count());
-    state.enqueue_times.pop();
-    state.retired.fetch_add(1);
-    return true;
+    state.cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -188,49 +175,94 @@ static bool retire_one(Semaphore &sem, SharedState &state) {
 
 static void producer_thread(int num_runs, size_t input_size, const std::vector<int> &shape, Semaphore &sem,
                             SharedState &state, const uint8_t *image_buf) {
-    for (int i = 0; i < num_runs && !state.error.load(); i++) {
+    for (int i = 0; i < num_runs && !has_failed(state); i++) {
         sem.acquire();
 
         Tensors *inp = make_input(input_size, shape, image_buf);
         if (!inp) {
             fprintf(stderr, "[producer] OOM at run %d/%d\n", i + 1, num_runs);
-            state.error.store(true);
+            fail(state);
             sem.release();
-            return;
+            break;
         }
 
         auto t = std::chrono::high_resolution_clock::now();
-        {
-            std::lock_guard<std::mutex> lock(state.times_mutex);
-            state.enqueue_times.push(t);
-        }
-
-        // A full output pool (TIMEOUT) is backpressure: the input stays ours, so
-        // retire one output to make room and retry.
         RuntimeStatus s;
-        while ((s = runtime_enqueue_input(0, inp)) == RUNTIME_STATUS_TIMEOUT) {
-            if (!retire_one(sem, state)) {
-                free_tensors(inp);
-                return;
+        {
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.enqueue_times.push(t);
+            // A full output pool (TIMEOUT) is backpressure: the input stays ours.
+            // The consumer is the only one retrieving, so wait for it to retire
+            // an output (freeing a pool slot), then retry.
+            for (;;) {
+                const int seen = state.retired;
+                lock.unlock();
+                s = runtime_enqueue_input(0, inp);
+                lock.lock();
+                if (s != RUNTIME_STATUS_TIMEOUT) break;
+                state.cv.wait(lock, [&] { return state.retired != seen || state.error; });
+                if (state.error) break;
             }
         }
         if (s != RUNTIME_STATUS_SUCCESS) {
-            fprintf(stderr, "[producer] enqueue failed at run %d/%d: %s\n", i + 1, num_runs, runtime_get_error());
+            if (s != RUNTIME_STATUS_TIMEOUT)
+                fprintf(stderr, "[producer] enqueue failed at run %d/%d: %s\n", i + 1, num_runs, runtime_get_error());
             free_tensors(inp);
-            state.error.store(true);
+            fail(state);
             sem.release();
-            return;
+            break;
         }
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.submitted++;
+        }
+        state.cv.notify_all();
     }
+
+    // Lets the consumer stop waiting for outputs that will never come.
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.producer_done = true;
+    }
+    state.cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------
-// Consumer: retires outputs until all num_runs requests are complete
+// Consumer: retrieves outputs of accepted requests, records per-request latency
 // ---------------------------------------------------------------------------
 
-static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state) {
-    while (state.retired.load() < num_runs && !state.error.load()) {
-        if (!retire_one(sem, state)) return;
+static void consumer_thread(Semaphore &sem, SharedState &state) {
+    for (;;) {
+        {
+            // Retrieve only while an output is guaranteed to arrive, so the
+            // blocking retrieve below can never outlive the producer.
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.cv.wait(lock, [&] { return state.retired < state.submitted || state.producer_done || state.error; });
+            if (state.error || state.retired == state.submitted) return;
+        }
+
+        int out_model = -1;
+        Tensors *out = nullptr;
+        RuntimeStatus s = runtime_retrieve_output(&out_model, &out, -1);
+        auto t_out = std::chrono::high_resolution_clock::now();
+
+        free_tensors(out);
+        sem.release();
+        if (s != RUNTIME_STATUS_SUCCESS) {
+            fprintf(stderr, "[consumer] retrieve failed: %s\n", runtime_get_error());
+            fail(state);
+            return;
+        }
+        if (out_model != 0) fprintf(stderr, "[consumer] unexpected out_model=%d\n", out_model);
+
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.latencies_ms.push_back(
+                std::chrono::duration<double, std::milli>(t_out - state.enqueue_times.front()).count());
+            state.enqueue_times.pop();
+            state.retired++;
+        }
+        state.cv.notify_all();
     }
 }
 
@@ -427,7 +459,7 @@ int main(int argc, char **argv) {
 
     std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape), std::ref(sem), std::ref(state),
                          img_buf);
-    std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state));
+    std::thread consumer(consumer_thread, std::ref(sem), std::ref(state));
 
     producer.join();
     consumer.join();
@@ -436,7 +468,7 @@ int main(int argc, char **argv) {
 
     runtime_cleanup();
 
-    if (state.error.load()) {
+    if (state.error) {
         fprintf(stderr, "Inference run failed.\n");
         return 1;
     }
