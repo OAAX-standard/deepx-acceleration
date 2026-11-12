@@ -30,18 +30,24 @@
 //     setup a large one.  The worst case grows with the number of models.
 //   - A request holds an output buffer from submission to DX-RT until it is
 //     retrieved.  A request accepted while its model's pool is full waits in
-//     that model's pending FIFO (the request itself, still zero-copy) and is
-//     submitted, oldest first, by the runtime_retrieve_output call that frees
-//     a buffer; no extra thread is involved.  The FIFO holds at most
-//     max_pending_requests (runtime_init config key, default 256; 0 disables
-//     it).  When pool and FIFO are both full, enqueue returns TIMEOUT
-//     (backpressure: the caller keeps the input), for that model only.
+//     that model's pending FIFO (the request itself, still zero-copy).  The
+//     runtime_retrieve_output call that frees a buffer assigns it to the
+//     oldest pending request and calls RunAsync for it; no extra thread is
+//     involved.  (RunAsync runs outside the lock, so concurrent retrieves may
+//     submit in a slightly different order than buffers were assigned.)
+//     The FIFO holds at most max_pending_requests (runtime_init config key,
+//     default 256; 0 disables it).  When pool and FIFO are both full, enqueue
+//     returns TIMEOUT (backpressure: the caller keeps the input), for that
+//     model only.
 //   - If DX-RT rejects a request (RunAsync throws), enqueue returns
 //     INFERENCE_ERROR when it was submitted right away.  A pending request was
 //     already accepted, so it is answered instead: it keeps its buffer and
 //     goes to the output queue, and runtime_retrieve_output returns
 //     INFERENCE_ERROR with its model id and the request id in the error text.
 //     Either way each accepted request is answered exactly once.
+//   - The last error is per thread (like errno), so a caller reads the error
+//     of its own call even while other threads fail.  runtime_init and
+//     runtime_cleanup invalidate every thread's message.
 //   - Each job holds a reference to its ModelContext, so the context (and its
 //     pool) outlives every job of that model, even across runtime_cleanup.
 //   - runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
@@ -91,7 +97,8 @@ struct JobData {
     Tensors *input_tensors{nullptr};  // caller's input; owned here, freed in completion callback
     void *outputs_ptr{nullptr};       // set when the job is submitted
     dxrt::TensorPtrs dxrt_outputs;
-    bool rejected{false};  // DX-RT rejected the pending job; answered with an error
+    bool rejected{false};  // DX-RT rejected the job; `error` says why
+    std::string error;
 };
 
 // ---------------------------------------------------------------------------
@@ -203,16 +210,26 @@ moodycamel::ConcurrentQueue<JobData *> g_output_queue;
 // instead of busy-polling the lock-free queue.
 OutputSemaphore g_output_sem;
 
-// Last error text.  Set from any API thread, so it is guarded by a mutex;
-// runtime_get_error() returns a per-thread copy so the pointer stays valid.
-std::string g_last_error;
-std::mutex g_error_mtx;
+// Last error of the calling thread.  A message is valid only while its
+// generation is current: runtime_init and runtime_cleanup advance
+// g_error_generation, which clears every thread's message at once.
+std::atomic<unsigned> g_error_generation{0};
+struct LastError {
+    std::string text;
+    unsigned generation{0};
+};
+thread_local LastError t_last_error;
 
-// Records `msg` as the last error.  Does not log: some errors (e.g. output
-// pool backpressure) are expected on the hot path.
-void set_error(const std::string &msg) {
-    std::lock_guard<std::mutex> lk(g_error_mtx);
-    g_last_error = msg;
+// Records `msg` as the calling thread's last error.  Does not log: some errors
+// (e.g. backpressure) are expected on the hot path.  Never throws: if the
+// message cannot be stored, the thread is left with no message.
+void set_error(const char *msg) noexcept {
+    try {
+        t_last_error.text = msg;
+    } catch (...) {
+        t_last_error.text.clear();
+    }
+    t_last_error.generation = g_error_generation.load();
 }
 
 // Parses a non-negative decimal integer that fits in size_t.
@@ -344,13 +361,13 @@ size_t compute_pool_capacity() {
 // ---------------------------------------------------------------------------
 
 // Records and logs a failure of the model at `index` of runtime_load_models'
-// list (its model id) as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
+// list as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
 // it also reports exceptions such as std::bad_alloc, so if recording fails
 // the status is still returned.
 RuntimeStatus model_error(int index, RuntimeStatus status, const char *msg, const char *detail = "") noexcept {
     try {
         const std::string error = "model[" + std::to_string(index) + "]: " + msg + detail;
-        set_error(error);
+        set_error(error.c_str());
         spdlog::error("{}", error);
     } catch (...) {
         // Out of memory even for the message: the status alone must do.
@@ -390,20 +407,33 @@ void finish_in_flight(ModelContext &ctx) {
     }
 }
 
+// Marks the job rejected by DX-RT and logs why; the reason is kept in
+// jd->error for the API call that reports it.
+void reject(JobData *jd, const char *reason) noexcept {
+    jd->rejected = true;
+    try {
+        jd->error = "model[" + std::to_string(jd->ctx->model_id) + "]: request " + std::to_string(jd->request_id) +
+                    " rejected by DX-RT: " + reason;
+        spdlog::error("{}", jd->error);
+    } catch (...) {
+        // Out of memory even for the message: the status alone must do.
+    }
+}
+
 // Submits a job whose output buffer is set and which is already counted in
-// in_flight.  Returns false if DX-RT rejects it (error recorded and logged);
-// the job then still owns its input and buffer and is still in flight.
+// in_flight.  Returns false if DX-RT rejects it (see reject()); the job then
+// still owns its input and buffer and is still in flight.  Does not touch the
+// caller's last error, so a retrieve that submits a pending job is unaffected.
 bool submit(JobData *jd) noexcept {
-    ModelContext &ctx = *jd->ctx;
     try {
         // Zero-copy: DX-RT reads the caller's input asynchronously, so the
         // JobData keeps it alive until the completion callback.
-        ctx.engine->RunAsync(jd->input_tensors->tensors[0].data, jd, jd->outputs_ptr);
+        jd->ctx->engine->RunAsync(jd->input_tensors->tensors[0].data, jd, jd->outputs_ptr);
         return true;
     } catch (const std::exception &e) {
-        model_error(ctx.model_id, RUNTIME_STATUS_INFERENCE_ERROR, "RunAsync failed: ", e.what());
+        reject(jd, e.what());
     } catch (...) {
-        model_error(ctx.model_id, RUNTIME_STATUS_INFERENCE_ERROR, "RunAsync failed with a non-standard exception");
+        reject(jd, "non-standard exception");
     }
     return false;
 }
@@ -426,7 +456,6 @@ void release_output(ModelContext &ctx, void *buffer) {
     if (!submit(next)) {
         // Already accepted: answer it with an error (it keeps the buffer
         // until retrieved, like any other job).
-        next->rejected = true;
         deliver(next);
         finish_in_flight(ctx);
     }
@@ -522,6 +551,7 @@ RuntimeStatus runtime_init(Config config) {
         }
     }
     g_max_pending_requests = max_pending;
+    ++g_error_generation;  // no thread keeps an error from before this init
 
     // Enable DX-RT dynamic CPU threading by default.  When a model has CPU
     // tasks (run via ONNX Runtime), a fixed thread pool can become the
@@ -646,8 +676,9 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     // Reject it; the caller keeps ownership of input_tensors.
     const size_t in_bytes = input_tensors->tensors[0].data_size;
     if (in_bytes != ctx->input_size) {
-        const std::string msg = "Input size " + std::to_string(in_bytes) + " does not match model input size " +
-                                std::to_string(ctx->input_size);
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "Input size %zu does not match model input size %zu", in_bytes,
+                      ctx->input_size);
         set_error(msg);
         spdlog::error("{}", msg);
         return RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH;
@@ -689,6 +720,7 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
     }
 
     if (!submit(jd.get())) {
+        set_error(jd->error.c_str());
         release_output(*ctx, jd->outputs_ptr);
         finish_in_flight(*ctx);
         return RUNTIME_STATUS_INFERENCE_ERROR;
@@ -737,8 +769,7 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
     release_output(*job->ctx, job->outputs_ptr);
 
     if (job->rejected) {
-        set_error("model[" + std::to_string(job->ctx->model_id) + "]: request " + std::to_string(job->request_id) +
-                  " was rejected by DX-RT (see log)");
+        set_error(job->error.c_str());
         return RUNTIME_STATUS_INFERENCE_ERROR;
     }
     if (!result) {
@@ -810,10 +841,7 @@ RuntimeStatus runtime_cleanup(void) {
     // g_shutting_down stays set until the next runtime_init, so a retriever
     // still holding a token of a drained job gives up instead of spinning.
     g_initialized.store(false);
-    {
-        std::lock_guard<std::mutex> lk(g_error_mtx);
-        g_last_error.clear();
-    }
+    ++g_error_generation;  // clears every thread's last error
 
     spdlog::info("Runtime cleanup done");
     if (g_logger) {
@@ -824,14 +852,11 @@ RuntimeStatus runtime_cleanup(void) {
 }
 
 const char *runtime_get_error(void) {
-    // Per-thread copy: the pointer stays valid until this thread's next call,
-    // even if another thread records a new error meanwhile.
-    static thread_local std::string snapshot;
-    {
-        std::lock_guard<std::mutex> lk(g_error_mtx);
-        snapshot = g_last_error;
-    }
-    return snapshot.empty() ? nullptr : snapshot.c_str();
+    // The calling thread's own error: other threads' failures never replace
+    // it, and the pointer stays valid until this thread's next failing call.
+    const LastError &e = t_last_error;
+    if (e.text.empty() || e.generation != g_error_generation.load()) return nullptr;
+    return e.text.c_str();
 }
 
 const char *runtime_get_version(void) { return OAAX_RUNTIME_VERSION; }

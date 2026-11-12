@@ -1037,6 +1037,106 @@ static void test_rejected_submission_answered() {
     printf("  PASSED\n");
 }
 
+// A thread's last error is its own: another thread's failure does not replace the request id of a
+// rejection, and a successful retrieve that submits a pending request leaves no error.
+static void test_last_error_is_per_thread() {
+    printf("=== test_last_error_is_per_thread ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    enqueue_accepted(0, 17);  // request 16 waits for a buffer
+    dxrt::run_async_failures().store(1);
+
+    std::promise<void> rejected, other_failed;
+    std::future<void> other_failed_done = other_failed.get_future();
+    std::thread a([&]() {
+        bool seen_rejection = false;
+        for (int i = 0; i < 17; i++) {
+            Tensors *output = nullptr;
+            const RuntimeStatus s = runtime_retrieve_output(nullptr, &output, 2000);
+            if (s == RUNTIME_STATUS_SUCCESS) {
+                assert(seen_rejection || runtime_get_error() == nullptr);
+                free_output(output);
+                continue;
+            }
+            assert(s == RUNTIME_STATUS_INFERENCE_ERROR && !seen_rejection);
+            seen_rejection = true;
+            rejected.set_value();
+            other_failed_done.wait();
+            assert(strstr(runtime_get_error(), "request 16") != nullptr);
+        }
+        assert(seen_rejection);
+    });
+    std::thread b([&]() {
+        rejected.get_future().wait();
+        Tensors *input = make_input(99);
+        assert(runtime_enqueue_input(5, input) == RUNTIME_STATUS_INVALID_MODEL_ID);
+        free_output(input);
+        assert(strcmp(runtime_get_error(), "Invalid model_id") == 0);
+        other_failed.set_value();
+    });
+    a.join();
+    b.join();
+
+    // runtime_cleanup and a successful runtime_init clear the thread's last error (conformance RT-L-15).
+    Tensors *input = make_input(0);
+    assert(runtime_enqueue_input(5, input) == RUNTIME_STATUS_INVALID_MODEL_ID);
+    free_output(input);
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_get_error() == nullptr);
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_NOT_INITIALIZED);
+    assert(runtime_get_error() != nullptr);
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_get_error() == nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// Each model's pending requests get output buffers in the order they were enqueued.
+static void test_pending_fifo_order() {
+    printf("=== test_pending_fifo_order ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
+    assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
+    {
+        std::lock_guard<std::mutex> lk(dxrt::run_async_log().mtx);
+        dxrt::run_async_log().first_ints.clear();
+    }
+
+    // Request i goes to model i % 2 and carries i in its first input bytes; 36 per model, 16 fit the pool.
+    const int kRequests = 72;
+    for (int i = 0; i < kRequests; i++) {
+        Tensors *input = make_input(i);
+        memcpy(input->tensors[0].data, &i, sizeof(i));
+        assert(runtime_enqueue_input(i % 2, input) == RUNTIME_STATUS_SUCCESS);
+    }
+    for (int i = 0; i < kRequests; i++) {
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        free_output(output);
+    }
+
+    std::vector<int> submitted;
+    {
+        std::lock_guard<std::mutex> lk(dxrt::run_async_log().mtx);
+        submitted = dxrt::run_async_log().first_ints;
+    }
+    assert((int)submitted.size() == kRequests);
+    int last[2] = {-1, -1};
+    for (int id : submitted) {
+        assert(id > last[id % 2]);
+        last[id % 2] = id;
+    }
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1084,6 +1184,8 @@ int main() {
     test_cleanup_frees_pending();
     test_info_counts_pending();
     test_rejected_submission_answered();
+    test_last_error_is_per_thread();
+    test_pending_fifo_order();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

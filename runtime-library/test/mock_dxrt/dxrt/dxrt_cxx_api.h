@@ -45,6 +45,16 @@ inline std::atomic<int> &run_async_failures() {
     return v;
 }
 
+// Test knob: the first int of every RunAsync input, in call order.
+struct RunAsyncLog {
+    std::mutex mtx;
+    std::vector<int> first_ints;
+};
+inline RunAsyncLog &run_async_log() {
+    static RunAsyncLog log;
+    return log;
+}
+
 class Tensor {
 public:
     Tensor(size_t size, uint8_t fill) : data_buf_(malloc(size)), size_(size) {
@@ -104,11 +114,17 @@ public:
 
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
-    int RunAsync(void *, void *userArg, void *) {
+    int RunAsync(void *input, void *userArg, void *) {
         int failures = run_async_failures().load();
         while (failures > 0 && !run_async_failures().compare_exchange_weak(failures, failures - 1)) {
         }
         if (failures > 0) throw std::runtime_error("mock: RunAsync failed");
+        {
+            int first = 0;
+            std::memcpy(&first, input, sizeof(first));
+            std::lock_guard<std::mutex> lk(run_async_log().mtx);
+            run_async_log().first_ints.push_back(first);
+        }
         const int job_id = next_job_id_.fetch_add(1);
         std::lock_guard<std::mutex> lk(mtx_);
         threads_.emplace_back([this, job_id, userArg]() {
