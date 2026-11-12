@@ -60,6 +60,7 @@ COPY deps /runtime_library/deps
 COPY include /runtime_library/include
 COPY src /runtime_library/src
 COPY CMakeLists.txt /runtime_library/CMakeLists.txt
+COPY runtime_core.map /runtime_library/runtime_core.map
 
 # =============================================================================
 # dx_rt installation

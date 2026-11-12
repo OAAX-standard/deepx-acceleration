@@ -66,6 +66,10 @@ set_target_properties(RuntimeLibrary PROPERTIES
     CXX_STANDARD 11
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
+    # Export only the functions marked RUNTIME_API
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
 )
 
 # Include directories
@@ -100,6 +104,12 @@ endif()
 # Linker flags (basic flags, specific version compatibility should be handled by toolchain)
 if (UNIX)
     set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--as-needed -Wl,--hash-style=gnu")
+
+    # libstdc++ template instantiations keep default visibility regardless of the presets above,
+    # so a version script is what limits the dynamic symbol table to the OAAX API.
+    set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS
+        " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/runtime_core.map")
+    set_property(TARGET RuntimeLibrary APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/runtime_core.map)
 endif()
 
 # Install rules

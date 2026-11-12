@@ -1,0 +1,14 @@
+{
+  global:
+    runtime_init;
+    runtime_load_models;
+    runtime_enqueue_input;
+    runtime_retrieve_output;
+    runtime_cleanup;
+    runtime_get_error;
+    runtime_get_version;
+    runtime_get_name;
+    runtime_get_info;
+  local:
+    *;
+};

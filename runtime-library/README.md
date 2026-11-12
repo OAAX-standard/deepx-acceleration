@@ -161,7 +161,7 @@ Lifecycle: `runtime_init` → `runtime_load_models` → loop of `runtime_enqueue
 - **Rejected requests**: if DX-RT rejects a request sent right away, `runtime_enqueue_input` returns `RUNTIME_STATUS_INFERENCE_ERROR` (the caller keeps the input). A queued request was already accepted, so its rejection is reported by `runtime_retrieve_output` instead: `RUNTIME_STATUS_INFERENCE_ERROR`, with the model id set and the request id in that thread's `runtime_get_error()`.
 - **Results are unordered**: outputs of all models share one queue. `runtime_retrieve_output` returns the model id with each output; match outputs to requests via the echoed `Tensors::id`.
 - **Info**: in `runtime_get_info()`, `requests_in_flight` counts requests accepted by `runtime_enqueue_input` and not yet retrieved, including the `pending_requests` still waiting in a model's queue.
-- **Errors**: `runtime_get_error()` returns the calling thread's last error (like `errno`: other threads' failures do not replace it), valid until that thread's next failing call. `runtime_init` and `runtime_cleanup` clear every thread's error.
+- **Errors**: `runtime_get_error()` returns the calling thread's last error (like `errno`: other threads' failures do not replace it), valid until that thread's next failing call. A successful `runtime_init`, and `runtime_cleanup` of an initialized runtime, clear every thread's error.
 - **Logging**: written to stderr and to `./runtime.log`; set `DEEPX_RUNTIME_LOG_FILE` to change the file and `SPDLOG_LEVEL` for verbosity.
 - **DX-RT dynamic CPU threads**: `DXRT_DYNAMIC_CPU_THREAD=ON` is set by `runtime_init` unless the variable is already set (so `OFF` is respected).
 
