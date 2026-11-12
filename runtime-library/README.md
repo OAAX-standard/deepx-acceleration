@@ -33,7 +33,7 @@ On Linux, the library is built using **Docker** containers to ensure consistent 
 ### Installing DX-RT
 
 The DX-RT versions this runtime is built and tested against are pinned in this directory:
-`dxrt_version.txt` (Linux, currently `3.3.2`) and `dxrt_windows_commit.txt` (Windows SDK commit).
+`dxrt_version.txt` (Linux, currently `3.5.0`) and `dxrt_windows_commit.txt` (Windows SDK commit).
 CI downloads exactly those; use the same versions locally.
 
 #### Linux (Ubuntu) DX-RT
@@ -55,7 +55,7 @@ If you need to use a specific version of DX-RT, you can checkout a particular ta
 # List available tags
 git tag
 
-# Checkout the pinned version (see dxrt_version.txt, e.g. v3.3.2)
+# Checkout the pinned version (see dxrt_version.txt, e.g. v3.5.0)
 git checkout "v$(cat ../dxrt_version.txt)"
 ```
 

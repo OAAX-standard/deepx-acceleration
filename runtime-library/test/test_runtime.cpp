@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "dxrt/dxrt_api.h"  // mock: scalar_output() test knob
+#include "dxrt/dxrt_cxx_api.h"  // mock: scalar_output() test knob
 #include "runtime_core.h"
 
 // ---------------------------------------------------------------------------
@@ -346,8 +346,8 @@ static void test_backpressure() {
     mc.config = cfg;
     assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
 
-    // Pool capacity = DXRT_TASK_MAX_LOAD_VALUE x mock device count (2).
-    const int capacity = DXRT_TASK_MAX_LOAD_VALUE * 2;
+    // Pool capacity = dxrt_get_task_max_load() x mock device count (2).
+    const int capacity = dxrt_get_task_max_load() * 2;
     for (int i = 0; i < capacity; i++) {
         assert(runtime_enqueue_input(0, make_input(i)) == RUNTIME_STATUS_SUCCESS);
     }

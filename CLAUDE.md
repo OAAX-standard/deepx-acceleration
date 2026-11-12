@@ -68,7 +68,7 @@ DeepX NPU (DX-M1 / DX-H1)
 
 ### Conversion Toolchain internals
 
-- Docker image based on `python:3.11-slim`. DX-COM (`dxcom` CLI) is pip-installed from the `sdk.deepx.ai` wheel at image build time (`DX_COM_VERSION` build arg, default 2.3.0).
+- Docker image based on `python:3.11-slim`. DX-COM (`dxcom` CLI) is pip-installed from the `sdk.deepx.ai` wheel at image build time (`DX_COM_VERSION` build arg, default 2.5.0).
 - Input to conversion: a ZIP containing the ONNX model, a JSON config, and (optionally) a calibration dataset.
 - Main conversion script executed inside the container: `conversion-toolchain/scripts/convert.sh`.
 

@@ -143,12 +143,44 @@ static std::vector<int> parse_shape(const char *s) {
 // ---------------------------------------------------------------------------
 
 struct SharedState {
-    // Enqueue timestamps, pushed by producer, popped by consumer (FIFO)
+    // Enqueue timestamps, pushed by producer, popped on completion (FIFO).
+    // times_mutex also guards latencies_ms.
     std::queue<std::chrono::high_resolution_clock::time_point> enqueue_times;
+    std::vector<double> latencies_ms;
     std::mutex times_mutex;
 
+    std::atomic<int> retired{0};
     std::atomic<bool> error{false};
 };
+
+// ---------------------------------------------------------------------------
+// Retrieves one output, records its latency and frees its pipeline slot.
+// Called by the consumer, and by the producer to make room when the runtime's
+// output pool is exhausted.
+// ---------------------------------------------------------------------------
+
+static bool retire_one(Semaphore &sem, SharedState &state) {
+    int out_model = -1;
+    Tensors *out = nullptr;
+    RuntimeStatus s = runtime_retrieve_output(&out_model, &out, -1);
+    auto t_out = std::chrono::high_resolution_clock::now();
+
+    free_tensors(out);
+    sem.release();
+    if (s != RUNTIME_STATUS_SUCCESS) {
+        fprintf(stderr, "[retire] retrieve failed: %s\n", runtime_get_error());
+        state.error.store(true);
+        return false;
+    }
+    if (out_model != 0) fprintf(stderr, "[retire] unexpected out_model=%d\n", out_model);
+
+    std::lock_guard<std::mutex> lock(state.times_mutex);
+    state.latencies_ms.push_back(
+        std::chrono::duration<double, std::milli>(t_out - state.enqueue_times.front()).count());
+    state.enqueue_times.pop();
+    state.retired.fetch_add(1);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Producer: enqueues num_runs requests, bounded by semaphore
@@ -173,7 +205,15 @@ static void producer_thread(int num_runs, size_t input_size, const std::vector<i
             state.enqueue_times.push(t);
         }
 
-        RuntimeStatus s = runtime_enqueue_input(0, inp);
+        // A full output pool (TIMEOUT) is backpressure: the input stays ours, so
+        // retire one output to make room and retry.
+        RuntimeStatus s;
+        while ((s = runtime_enqueue_input(0, inp)) == RUNTIME_STATUS_TIMEOUT) {
+            if (!retire_one(sem, state)) {
+                free_tensors(inp);
+                return;
+            }
+        }
         if (s != RUNTIME_STATUS_SUCCESS) {
             fprintf(stderr, "[producer] enqueue failed at run %d/%d: %s\n", i + 1, num_runs, runtime_get_error());
             free_tensors(inp);
@@ -185,39 +225,12 @@ static void producer_thread(int num_runs, size_t input_size, const std::vector<i
 }
 
 // ---------------------------------------------------------------------------
-// Consumer: retrieves num_runs outputs, records per-request latency
+// Consumer: retires outputs until all num_runs requests are complete
 // ---------------------------------------------------------------------------
 
-static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state, std::vector<double> &latencies_ms) {
-    latencies_ms.reserve(num_runs);
-
-    for (int i = 0; i < num_runs && !state.error.load(); i++) {
-        int out_model = -1;
-        Tensors *out = nullptr;
-        RuntimeStatus s = runtime_retrieve_output(&out_model, &out, -1);
-        auto t_out = std::chrono::high_resolution_clock::now();
-
-        if (s != RUNTIME_STATUS_SUCCESS) {
-            fprintf(stderr, "[consumer] retrieve failed at run %d/%d: %s\n", i + 1, num_runs, runtime_get_error());
-            free_tensors(out);
-            sem.release();
-            state.error.store(true);
-            return;
-        }
-        if (out_model != 0)
-            fprintf(stderr, "[consumer] unexpected out_model=%d at run %d/%d\n", out_model, i + 1, num_runs);
-
-        free_tensors(out);
-        sem.release();
-
-        std::chrono::high_resolution_clock::time_point t_in;
-        {
-            std::lock_guard<std::mutex> lock(state.times_mutex);
-            t_in = state.enqueue_times.front();
-            state.enqueue_times.pop();
-        }
-
-        latencies_ms.push_back(std::chrono::duration<double, std::milli>(t_out - t_in).count());
+static void consumer_thread(int num_runs, Semaphore &sem, SharedState &state) {
+    while (state.retired.load() < num_runs && !state.error.load()) {
+        if (!retire_one(sem, state)) return;
     }
 }
 
@@ -409,13 +422,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[bench] starting %d timed run(s) with pipeline_depth=%d\n", num_runs, pipeline_depth);
     Semaphore sem(pipeline_depth);
     SharedState state;
-    std::vector<double> latencies_ms;
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
     std::thread producer(producer_thread, num_runs, input_size, std::cref(input_shape), std::ref(sem), std::ref(state),
                          img_buf);
-    std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state), std::ref(latencies_ms));
+    std::thread consumer(consumer_thread, num_runs, std::ref(sem), std::ref(state));
 
     producer.join();
     consumer.join();
@@ -429,6 +441,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    std::vector<double> &latencies_ms = state.latencies_ms;
     double wall_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
     double throughput_fps = (wall_ms > 0) ? (num_runs * 1000.0 / wall_ms) : 0.0;
 

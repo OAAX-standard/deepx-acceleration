@@ -22,7 +22,7 @@
 //     pooled inputs because fresh pointers hit DMA errno=-70 (WRITE_INPUT) after
 //     ~10 runs on a fast model.  Re-validate on hardware (10k pipelined runs of
 //     squeezenet1_1) after any DX-RT upgrade.
-//   - The output buffer pool grows lazily up to DXRT_TASK_MAX_LOAD_VALUE ×
+//   - The output buffer pool grows lazily up to dxrt_get_task_max_load() ×
 //     NumDevice, matching DX-RT's own in-flight limit.  It caps memory and
 //     applies backpressure without manual tuning: a 1-channel setup uses a
 //     tiny pool, a 32-channel quad-H1 setup a large one.
@@ -30,7 +30,7 @@
 #include "runtime_core.h"
 
 #include <concurrentqueue.h>
-#include <dxrt/dxrt_api.h>
+#include <dxrt/dxrt_cxx_api.h>
 #include <spdlog/cfg/env.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -250,6 +250,9 @@ Tensors *build_output_tensors(const ModelContext &ctx, int request_id, const dxr
 // tuning required.
 // ---------------------------------------------------------------------------
 
+// Per-device in-flight limit assumed if DX-RT cannot report one.
+constexpr int kDefaultTaskMaxLoad = 6;
+
 size_t compute_pool_capacity() {
     int num_devices = 0;
     try {
@@ -258,8 +261,12 @@ size_t compute_pool_capacity() {
         num_devices = 0;
     }
     if (num_devices < 1) num_devices = 1;
-    const size_t per_device = static_cast<size_t>(DXRT_TASK_MAX_LOAD_VALUE);
-    return per_device * static_cast<size_t>(num_devices);
+    int per_device = dxrt_get_task_max_load();
+    if (per_device <= 0) {
+        spdlog::warn("dxrt_get_task_max_load() returned {}; assuming {}", per_device, kDefaultTaskMaxLoad);
+        per_device = kDefaultTaskMaxLoad;
+    }
+    return static_cast<size_t>(per_device) * static_cast<size_t>(num_devices);
 }
 
 }  // namespace

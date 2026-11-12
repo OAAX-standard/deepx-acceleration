@@ -42,7 +42,7 @@ Build the Docker image that contains the DeepX compiler and performs the convers
 
 #### DX-COM Version Configuration
 
-The DX-COM version defaults to `2.3.0` and can be overridden in three ways:
+The DX-COM version defaults to `2.5.0` and can be overridden in three ways:
 
 ```bash
 # 1. Use default version

@@ -18,7 +18,7 @@
 
 // Real DX-RT derives this from the device; a small fixed value keeps the
 // backpressure test fast (pool capacity = this * device count).
-const int DXRT_TASK_MAX_LOAD_VALUE = 8;
+inline int dxrt_get_task_max_load() { return 8; }
 
 namespace dxrt {
 

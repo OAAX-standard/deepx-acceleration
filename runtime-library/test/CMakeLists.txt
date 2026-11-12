@@ -20,7 +20,7 @@ if (MSVC)
 endif()
 
 # Include directories:
-# - mock_dxrt/ overrides real <dxrt/dxrt_api.h>
+# - mock_dxrt/ overrides real <dxrt/dxrt_cxx_api.h>
 # - spdlog from deps
 # - interface_2.h and runtime_core.h from include/
 include_directories(
