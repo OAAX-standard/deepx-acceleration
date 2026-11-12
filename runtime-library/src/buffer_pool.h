@@ -14,7 +14,8 @@
 //     per the OAAX non-blocking contract.  It throws std::bad_alloc if a new
 //     buffer cannot be allocated.
 //   - release() returns the buffer to the pool for reuse; buffers are not
-//     freed until the pool itself is destroyed.
+//     freed until the pool itself is destroyed.  It never throws: the free
+//     list reserves room for every buffer up front.
 //   - shutdown() makes subsequent try_acquire() calls fail during cleanup.
 //
 // Thread-safety: all methods are safe to call concurrently.
@@ -25,19 +26,18 @@
 #include <cstring>
 #include <mutex>
 #include <new>
-#include <queue>
+#include <vector>
 
 class BufferPool {
 public:
-    BufferPool(size_t buf_size, size_t hard_cap) : buf_size_(buf_size), hard_cap_(hard_cap == 0 ? 1 : hard_cap) {}
+    // Throws std::bad_alloc if the free list cannot be reserved.
+    BufferPool(size_t buf_size, size_t hard_cap) : buf_size_(buf_size), hard_cap_(hard_cap == 0 ? 1 : hard_cap) {
+        free_buffers_.reserve(hard_cap_);
+    }
 
     ~BufferPool() {
         std::lock_guard<std::mutex> lk(mtx_);
-        while (!free_buffers_.empty()) {
-            std::free(free_buffers_.front());
-            free_buffers_.pop();
-        }
-        allocated_ = 0;
+        for (void *p : free_buffers_) std::free(p);
     }
 
     BufferPool(const BufferPool &) = delete;
@@ -50,8 +50,8 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         if (shutting_down_) return nullptr;
         if (!free_buffers_.empty()) {
-            void *p = free_buffers_.front();
-            free_buffers_.pop();
+            void *p = free_buffers_.back();
+            free_buffers_.pop_back();
             return p;
         }
         if (allocated_ >= hard_cap_) return nullptr;
@@ -62,10 +62,10 @@ public:
         return p;
     }
 
-    void release(void *p) {
+    void release(void *p) noexcept {
         if (!p) return;
         std::lock_guard<std::mutex> lk(mtx_);
-        free_buffers_.push(p);
+        free_buffers_.push_back(p);  // within the reserved capacity
     }
 
     void shutdown() {
@@ -85,7 +85,7 @@ public:
 
 private:
     mutable std::mutex mtx_;
-    std::queue<void *> free_buffers_;
+    std::vector<void *> free_buffers_;  // capacity hard_cap_
     size_t buf_size_;
     size_t hard_cap_;
     size_t allocated_{0};

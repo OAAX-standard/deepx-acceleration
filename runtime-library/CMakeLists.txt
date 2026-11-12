@@ -63,7 +63,7 @@ target_compile_definitions(RuntimeLibrary PRIVATE RUNTIME_LIBRARY_EXPORTS)
 
 # Set C++ standard
 set_target_properties(RuntimeLibrary PROPERTIES
-    CXX_STANDARD 11
+    CXX_STANDARD 14
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
     # Export only the functions marked RUNTIME_API

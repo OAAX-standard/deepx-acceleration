@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(dx_oaax_test DESCRIPTION "OAAX 2.0 Runtime Test with Mock dxrt")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # The tests rely on assert(); never let a Release build (-DNDEBUG) turn them into no-ops.

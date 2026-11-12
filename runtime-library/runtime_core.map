@@ -1,3 +1,4 @@
+/* Lists every RUNTIME_API function of include/runtime_core.h; any symbol not listed is hidden. */
 {
   global:
     runtime_init;

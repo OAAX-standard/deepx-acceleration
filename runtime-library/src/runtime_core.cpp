@@ -53,8 +53,9 @@
 //     without its output tensors) is answered the same way.  Either way each
 //     accepted request is answered exactly once.
 //   - The last error is per thread (like errno), so a caller reads the error
-//     of its own call even while other threads fail.  runtime_init and
-//     runtime_cleanup invalidate every thread's message.
+//     of its own call even while other threads fail.  A successful
+//     runtime_init, and runtime_cleanup of an initialized runtime, clear
+//     every thread's message.
 //   - Each job holds a reference to its ModelContext, so the context (and its
 //     pool) outlives every job of that model, even across runtime_cleanup.
 //   - runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
@@ -173,7 +174,6 @@ struct OutputInfo {
 
 struct ModelContext {
     int model_id{0};
-    std::unique_ptr<dxrt::InferenceEngine> engine;
     std::vector<OutputInfo> outputs;
     size_t input_size{0};
     std::unique_ptr<BufferPool> output_pool;
@@ -192,6 +192,10 @@ struct ModelContext {
     std::atomic<int> in_flight{0};
     std::mutex in_flight_mtx;
     std::condition_variable in_flight_cv;
+
+    // Declared last, so it is destroyed first: its destructor waits for DX-RT's
+    // threads, whose completion callbacks use the members above.
+    std::unique_ptr<dxrt::InferenceEngine> engine;
 };
 
 // ---------------------------------------------------------------------------
@@ -265,7 +269,7 @@ bool parse_size(const char *text, size_t *out) {
 // Tensor helpers
 // ---------------------------------------------------------------------------
 
-void deep_free_tensors(Tensors *t) {
+void deep_free_tensors(Tensors *t) noexcept {
     if (!t) return;
     if (t->tensors) {
         for (int i = 0; i < t->num_tensors; ++i) {
@@ -366,13 +370,16 @@ size_t compute_pool_capacity() {
 // Model loading
 // ---------------------------------------------------------------------------
 
+// Returns the "model[<index>]: " prefix of the messages about a model.
+std::string model_prefix(int index) { return "model[" + std::to_string(index) + "]: "; }
+
 // Records and logs a failure of the model at `index` of runtime_load_models'
 // list as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
 // it also reports exceptions such as std::bad_alloc, so if recording fails
 // the status is still returned.
 RuntimeStatus model_error(int index, RuntimeStatus status, const char *msg, const char *detail = "") noexcept {
     try {
-        const std::string error = "model[" + std::to_string(index) + "]: " + msg + detail;
+        const std::string error = model_prefix(index) + msg + detail;
         set_error(error.c_str());
         spdlog::error("{}", error);
     } catch (...) {
@@ -396,14 +403,14 @@ RuntimeStatus model_exception_error(int index) noexcept {
 }
 
 // Hands a finished job to runtime_retrieve_output.
-void deliver(JobData *jd) {
+void deliver(JobData *jd) noexcept {
     g_output_queue.enqueue(jd);  // lock-free push, then signal a waiting consumer
     g_output_sem.signal();
 }
 
 // Ends a job's in-flight count; runtime_cleanup waits for zero.  Call after
 // the job was delivered, so a drained model has nothing left to deliver.
-void finish_in_flight(ModelContext &ctx) {
+void finish_in_flight(ModelContext &ctx) noexcept {
     // The atomic itself is the source of truth; we only take the lock + notify
     // on the 0-transition, which is all cleanup waits for.  This keeps the
     // steady-state completion path lock-free.
@@ -418,8 +425,7 @@ void finish_in_flight(ModelContext &ctx) {
 void fail_job(JobData *jd, const char *what, const char *detail = "") noexcept {
     jd->failed = true;
     try {
-        jd->error = "model[" + std::to_string(jd->ctx->model_id) + "]: request " + std::to_string(jd->request_id) +
-                    " " + what + detail;
+        jd->error = model_prefix(jd->ctx->model_id) + "request " + std::to_string(jd->request_id) + " " + what + detail;
         spdlog::error("{}", jd->error);
     } catch (...) {
         // Out of memory even for the message: the status alone must do.
@@ -446,7 +452,7 @@ bool submit(JobData *jd) noexcept {
 
 // Returns a retrieved job's output buffer: it goes to the model's oldest
 // pending job, which is submitted, or back to the pool.
-void release_output(ModelContext &ctx, void *buffer) {
+void release_output(ModelContext &ctx, void *buffer) noexcept {
     JobData *next = nullptr;
     {
         std::lock_guard<std::mutex> lk(ctx.pending_mtx);
@@ -491,7 +497,7 @@ bool store_outputs(const ModelContext &ctx, const dxrt::TensorPtrs &outputs, voi
 // left untouched.  Exceptions other than a rejected model (e.g. std::bad_alloc)
 // propagate to the caller.
 RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique_ptr<ModelContext> *out) {
-    const std::string prefix = "model[" + std::to_string(index) + "]: ";
+    const std::string prefix = model_prefix(index);
 
     if (mc.model_data) {
         if (mc.model_size == 0) {
@@ -540,9 +546,11 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
                  output_total);
 
     // Register completion callback.  Captures the raw context pointer; the
-    // engine is destroyed before the context, so this is safe.
+    // engine is destroyed before the context's other members, so this is safe.
+    // It must not throw: the job would never be delivered nor leave in_flight,
+    // so its request would go unanswered and runtime_cleanup would wait forever.
     ModelContext *ctx_raw = ctx.get();
-    ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) -> int {
+    ctx_raw->engine->RegisterCallback([ctx_raw](dxrt::TensorPtrs &outputs, void *userArg) noexcept -> int {
         auto *jd = static_cast<JobData *>(userArg);
         if (jd) {
             if (!store_outputs(*ctx_raw, outputs, jd->outputs_ptr)) fail_job(jd, "failed in DX-RT");

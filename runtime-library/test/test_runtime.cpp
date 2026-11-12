@@ -788,8 +788,8 @@ static void test_backpressure_isolated() {
     ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
     assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
 
-    // Fill model 0: pool capacity = dxrt_get_task_max_load() x mock device count (2), plus 4 pending.
-    const int capacity = dxrt_get_task_max_load() * 2 + 4;
+    // Fill model 0: pool capacity = dxrt_get_task_max_load() x device count, plus 4 pending.
+    const int capacity = dxrt_get_task_max_load() * dxrt::DeviceStatus::GetDeviceCount() + 4;
     int accepted = 0;
     for (int i = 0; i <= capacity; i++) {
         Tensors *input = make_input(i);
