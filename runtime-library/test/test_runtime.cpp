@@ -483,7 +483,7 @@ static void test_load_from_memory() {
     printf("  PASSED\n");
 }
 
-// The runtime copies model_data: the caller may reuse its buffer right after the load.
+// The caller may reuse or free model_data as soon as runtime_load_models returns.
 static void test_memory_buffer_copied() {
     printf("=== test_memory_buffer_copied ===\n");
 

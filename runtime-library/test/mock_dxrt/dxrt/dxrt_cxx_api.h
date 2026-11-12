@@ -58,11 +58,11 @@ public:
     explicit InferenceEngine(const std::string &) {}
 
     // A valid in-memory model is "DXNN" followed by the byte outputs are filled
-    // with.  The pointer is kept and re-checked on every RunAsync, like an engine
-    // that parses lazily, so a runtime that does not keep its own copy of the
-    // caller's buffer fails once the caller reuses it.
-    InferenceEngine(const uint8_t *data, size_t size) : model_(data), model_size_(size) {
-        if (!valid_model()) throw std::runtime_error("mock: invalid model buffer");
+    // with.  Like DX-RT, everything needed is taken during construction; the
+    // buffer is never read afterwards.
+    InferenceEngine(const uint8_t *data, size_t size) {
+        if (size < 5 || std::memcmp(data, "DXNN", 4) != 0) throw std::runtime_error("mock: invalid model buffer");
+        fill_ = data[4];
     }
 
     // Like the real engine, destruction waits for every in-flight job (and its callback).
@@ -84,23 +84,18 @@ public:
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
     int RunAsync(void *, void *userArg, void *) {
-        if (model_ && !valid_model()) throw std::runtime_error("mock: model buffer modified after load");
-        const uint8_t fill = model_ ? model_[4] : 0x42;
         const int job_id = next_job_id_.fetch_add(1);
         std::lock_guard<std::mutex> lk(mtx_);
-        threads_.emplace_back([this, job_id, userArg, fill]() {
+        threads_.emplace_back([this, job_id, userArg]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5 + (job_id % 11)));
-            TensorPtrs outputs{std::make_shared<Tensor>(GetOutputSize(), fill)};
+            TensorPtrs outputs{std::make_shared<Tensor>(GetOutputSize(), fill_)};
             if (callback_) callback_(outputs, userArg);
         });
         return job_id;
     }
 
 private:
-    bool valid_model() const { return model_size_ >= 5 && std::memcmp(model_, "DXNN", 4) == 0; }
-
-    const uint8_t *model_{nullptr};  // in-memory model, or null when loaded from a file
-    size_t model_size_{0};
+    uint8_t fill_{0x42};  // output fill byte: buf[4] for in-memory models
     std::function<int(TensorPtrs &, void *)> callback_;
     std::atomic<int> next_job_id_{0};
     std::mutex mtx_;

@@ -116,10 +116,6 @@ private:
 };
 
 struct ModelContext {
-    // Private copy of ModelConfig.model_data (empty for file models): the caller
-    // may free its buffer once runtime_load_models returns.  Declared before
-    // `engine` so it outlives the engine built from it.
-    std::vector<uint8_t> model_bytes;
     std::unique_ptr<dxrt::InferenceEngine> engine;
     std::vector<uint64_t> output_sizes;
     size_t input_size{0};
@@ -290,10 +286,8 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
         return status;
     };
 
-    std::unique_ptr<ModelContext> ctx(new ModelContext());
     if (mc.model_data) {
         if (mc.model_size == 0) return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "model_data is set but model_size is 0");
-        ctx->model_bytes.assign(mc.model_data, mc.model_data + mc.model_size);
         spdlog::info("{}loading model from memory ({} bytes): {}", prefix, mc.model_size,
                      mc.file_path ? mc.file_path : "(unnamed)");
     } else if (mc.file_path) {
@@ -305,10 +299,12 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
         return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "Neither model_data nor file_path is set");
     }
 
+    std::unique_ptr<ModelContext> ctx(new ModelContext());
     try {
-        ctx->engine.reset(ctx->model_bytes.empty()
-                              ? new dxrt::InferenceEngine(std::string(mc.file_path))
-                              : new dxrt::InferenceEngine(ctx->model_bytes.data(), ctx->model_bytes.size()));
+        // DX-RT copies what it needs from model_data while constructing the
+        // engine, so the caller may free its buffer once this call returns.
+        ctx->engine.reset(mc.model_data ? new dxrt::InferenceEngine(mc.model_data, mc.model_size)
+                                        : new dxrt::InferenceEngine(std::string(mc.file_path)));
     } catch (const std::exception &e) {
         return fail(RUNTIME_STATUS_INVALID_MODEL, std::string("Failed to load model: ") + e.what());
     }
