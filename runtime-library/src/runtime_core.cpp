@@ -139,8 +139,10 @@ std::atomic<bool> g_shutting_down{false};
 std::vector<std::unique_ptr<ModelContext>> g_models;
 std::mutex g_models_mtx;
 
-// Serializes runtime_load_models calls.  Held while engines are built, so
-// g_models_mtx (taken by completion callbacks and the other API calls) is not.
+// Serializes runtime_load_models and runtime_cleanup, so a load either
+// completes before a cleanup starts or sees the runtime uninitialized.  Held
+// while engines are built; g_models_mtx is not, so the other API calls are not
+// blocked meanwhile.  Lock order: g_load_mtx, then g_models_mtx.
 std::mutex g_load_mtx;
 
 // Lock-free MPMC queue of completed jobs.  DX-RT completion callbacks (many
@@ -280,12 +282,32 @@ size_t compute_pool_capacity() {
 // ---------------------------------------------------------------------------
 
 // Records and logs a failure of the model at `index` of runtime_load_models'
-// list as "model[<index>]: <msg>", and returns `status`.
-RuntimeStatus model_error(int index, RuntimeStatus status, const std::string &msg) {
-    const std::string error = "model[" + std::to_string(index) + "]: " + msg;
-    set_error(error);
-    spdlog::error("{}", error);
+// list as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
+// it also reports exceptions such as std::bad_alloc, so if recording fails
+// the status is still returned.
+RuntimeStatus model_error(int index, RuntimeStatus status, const char *msg, const char *detail = "") noexcept {
+    try {
+        const std::string error = "model[" + std::to_string(index) + "]: " + msg + detail;
+        set_error(error);
+        spdlog::error("{}", error);
+    } catch (...) {
+        // Out of memory even for the message: the status alone must do.
+    }
     return status;
+}
+
+// Maps the exception being handled to a status and a "model[<index>]: ..."
+// error.  Call only from within a catch block.
+RuntimeStatus model_exception_error(int index) noexcept {
+    try {
+        throw;
+    } catch (const std::bad_alloc &) {
+        return model_error(index, RUNTIME_STATUS_OUT_OF_MEMORY, "Out of memory");
+    } catch (const std::exception &e) {
+        return model_error(index, RUNTIME_STATUS_ERROR, "Unexpected exception: ", e.what());
+    } catch (...) {
+        return model_error(index, RUNTIME_STATUS_UNKNOWN_ERROR, "Unexpected non-standard exception");
+    }
 }
 
 // Builds the context (engine, output pool, completion callback) for the model
@@ -305,8 +327,7 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
                      mc.file_path ? mc.file_path : "(unnamed)");
     } else if (mc.file_path) {
         if (!std::ifstream(mc.file_path, std::ios::binary)) {
-            return model_error(index, RUNTIME_STATUS_FILE_NOT_FOUND,
-                               std::string("Model file not found: ") + mc.file_path);
+            return model_error(index, RUNTIME_STATUS_FILE_NOT_FOUND, "Model file not found: ", mc.file_path);
         }
         spdlog::info("{}loading model: {}", prefix, mc.file_path);
     } else {
@@ -322,7 +343,7 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
     } catch (const std::bad_alloc &) {
         throw;  // not a model problem: reported as OUT_OF_MEMORY by runtime_load_models
     } catch (const std::exception &e) {
-        return model_error(index, RUNTIME_STATUS_INVALID_MODEL, std::string("Failed to load model: ") + e.what());
+        return model_error(index, RUNTIME_STATUS_INVALID_MODEL, "Failed to load model: ", e.what());
     }
 
     ctx->output_sizes = ctx->engine->GetOutputTensorSizes();
@@ -425,6 +446,7 @@ RuntimeStatus runtime_init(Config config) {
 }
 
 RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs) {
+    std::lock_guard<std::mutex> load_lk(g_load_mtx);
     if (!g_initialized.load()) {
         set_error("Runtime not initialized");
         return RUNTIME_STATUS_NOT_INITIALIZED;
@@ -434,7 +456,6 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
         return RUNTIME_STATUS_INVALID_ARGUMENT;
     }
 
-    std::lock_guard<std::mutex> load_lk(g_load_mtx);
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         if (!g_models.empty()) {
@@ -455,12 +476,9 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
             if (status != RUNTIME_STATUS_SUCCESS) return status;
             models.push_back(std::move(ctx));
         }
-    } catch (const std::bad_alloc &) {
-        return model_error(index, RUNTIME_STATUS_OUT_OF_MEMORY, "Out of memory");
-    } catch (const std::exception &e) {
-        return model_error(index, RUNTIME_STATUS_ERROR, std::string("Failed to load model: ") + e.what());
     } catch (...) {
-        return model_error(index, RUNTIME_STATUS_UNKNOWN_ERROR, "Failed to load model: unknown exception");
+        models.clear();  // free what was built before reporting (memory may be short)
+        return model_exception_error(index);
     }
 
     {
@@ -616,6 +634,8 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
 }
 
 RuntimeStatus runtime_cleanup(void) {
+    // Waits for a load in progress; see g_load_mtx.
+    std::lock_guard<std::mutex> load_lk(g_load_mtx);
     if (!g_initialized.load()) return RUNTIME_STATUS_SUCCESS;
 
     spdlog::info("Runtime cleanup begin");
