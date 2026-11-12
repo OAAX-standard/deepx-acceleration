@@ -90,6 +90,32 @@ static std::vector<unsigned char> first_output_byte_per_model(int n) {
     return bytes;
 }
 
+// Initializes the runtime with the config key max_pending_requests set to `value`.
+static RuntimeStatus init_with_max_pending(const char *value) {
+    const char *keys[] = {"max_pending_requests"};
+    const char *values[] = {value};
+    Config cfg = {1, keys, values};
+    return runtime_init(cfg);
+}
+
+// Enqueues request ids first..first+n-1 on model 0; each must be accepted.
+static void enqueue_accepted(int first, int n) {
+    for (int i = first; i < first + n; i++) assert(runtime_enqueue_input(0, make_input(i)) == RUNTIME_STATUS_SUCCESS);
+}
+
+// Retrieves n outputs, which must answer request ids 0..n-1 of model 0, each exactly once.
+static void expect_answers(int n) {
+    std::vector<int> times_seen(n, 0);
+    for (int i = 0; i < n; i++) {
+        int mid = -1;
+        Tensors *output = nullptr;
+        assert(runtime_retrieve_output(&mid, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        assert(mid == 0 && output->id >= 0 && output->id < n);
+        assert(times_seen[output->id]++ == 0);
+        free_output(output);
+    }
+}
+
 // Returns f's result, or fails the test (instead of hanging it) if f is not ready within timeout_ms.
 template <typename T>
 static T get_within(std::future<T> &f, int timeout_ms, const char *what) {
@@ -379,7 +405,7 @@ static void test_input_size_mismatch() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: Backpressure — output pool exhaustion returns TIMEOUT, then recovers
+// Test 9: Backpressure — a full output pool and pending queue return TIMEOUT, then recover
 // ---------------------------------------------------------------------------
 
 static void test_backpressure() {
@@ -392,11 +418,9 @@ static void test_backpressure() {
     mc.config = cfg;
     assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
 
-    // Pool capacity = dxrt_get_task_max_load() x mock device count (2).
-    const int capacity = dxrt_get_task_max_load() * 2;
-    for (int i = 0; i < capacity; i++) {
-        assert(runtime_enqueue_input(0, make_input(i)) == RUNTIME_STATUS_SUCCESS);
-    }
+    // Pool capacity = dxrt_get_task_max_load() x mock device count (2), plus 256 pending (the default).
+    const int capacity = dxrt_get_task_max_load() * 2 + 256;
+    enqueue_accepted(0, capacity);
 
     // Outputs are only released on retrieve, so the next enqueue must fail fast.
     Tensors *rejected = make_input(capacity);
@@ -712,9 +736,10 @@ static void test_load_exception_rolls_back() {
 // Test 15: Concurrent inference on several models
 // ---------------------------------------------------------------------------
 
-// Producers on several threads share two models; every request is answered exactly once, by its own model.
-static void test_concurrent_producers_two_models() {
-    printf("=== test_concurrent_producers_two_models ===\n");
+// Producers on several threads share two models and never retry (OAAX conformance RT-M-29): every
+// request is accepted, and answered exactly once by its own model.
+static void test_concurrent_producers_no_retry() {
+    printf("=== test_concurrent_producers_no_retry ===\n");
 
     const int kProducers = 4;
     const int kPerProducer = 25;
@@ -728,12 +753,7 @@ static void test_concurrent_producers_two_models() {
     for (int t = 0; t < kProducers; t++) {
         producers.emplace_back([=]() {
             for (int k = 0; k < kPerProducer; k++) {
-                Tensors *input = make_input(t * 100 + k);
-                RuntimeStatus s;
-                while ((s = runtime_enqueue_input(k % 2, input)) == RUNTIME_STATUS_TIMEOUT) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-                assert(s == RUNTIME_STATUS_SUCCESS);
+                assert(runtime_enqueue_input(k % 2, make_input(t * 100 + k)) == RUNTIME_STATUS_SUCCESS);
             }
         });
     }
@@ -759,17 +779,16 @@ static void test_concurrent_producers_two_models() {
     printf("  PASSED\n");
 }
 
-// A full output pool on one model does not block another model.
+// A full output pool and pending queue on one model do not block another model.
 static void test_backpressure_isolated() {
     printf("=== test_backpressure_isolated ===\n");
 
-    Config cfg = {0, nullptr, nullptr};
-    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    assert(init_with_max_pending("4") == RUNTIME_STATUS_SUCCESS);
     ModelConfig mcs[] = {file_model("dummy.dxnn"), file_model("dummy.dxnn")};
     assert(runtime_load_models(2, mcs) == RUNTIME_STATUS_SUCCESS);
 
-    // Fill model 0's pool: capacity = dxrt_get_task_max_load() x mock device count (2).
-    const int capacity = dxrt_get_task_max_load() * 2;
+    // Fill model 0: pool capacity = dxrt_get_task_max_load() x mock device count (2), plus 4 pending.
+    const int capacity = dxrt_get_task_max_load() * 2 + 4;
     int accepted = 0;
     for (int i = 0; i <= capacity; i++) {
         Tensors *input = make_input(i);
@@ -863,6 +882,162 @@ static void test_cleanup_multi_model_wakes_retriever() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 16: Requests beyond the output pool wait in a bounded per-model queue
+// ---------------------------------------------------------------------------
+
+static void test_enqueue_beyond_pool_is_queued() {
+    printf("=== test_enqueue_beyond_pool_is_queued ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    enqueue_accepted(0, 40);  // pool capacity is 16
+    expect_answers(40);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_pending_queue_full_returns_timeout() {
+    printf("=== test_pending_queue_full_returns_timeout ===\n");
+
+    assert(init_with_max_pending("4") == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    enqueue_accepted(0, 16 + 4);
+    Tensors *rejected = make_input(20);
+    assert(runtime_enqueue_input(0, rejected) == RUNTIME_STATUS_TIMEOUT);
+
+    // Retrieving one request makes room again; the caller still owns the rejected input.
+    Tensors *output = nullptr;
+    assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+    const int retrieved_id = output->id;
+    free_output(output);
+    assert(runtime_enqueue_input(0, rejected) == RUNTIME_STATUS_SUCCESS);
+
+    std::vector<int> times_seen(21, 0);
+    times_seen[retrieved_id] = 1;
+    for (int i = 0; i < 20; i++) {
+        assert(runtime_retrieve_output(nullptr, &output, 2000) == RUNTIME_STATUS_SUCCESS);
+        assert(output->id >= 0 && output->id <= 20 && times_seen[output->id]++ == 0);
+        free_output(output);
+    }
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_max_pending_zero_keeps_old_behaviour() {
+    printf("=== test_max_pending_zero_keeps_old_behaviour ===\n");
+
+    assert(init_with_max_pending("0") == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    enqueue_accepted(0, 16);
+    Tensors *rejected = make_input(16);
+    assert(runtime_enqueue_input(0, rejected) == RUNTIME_STATUS_TIMEOUT);
+    free_output(rejected);
+    expect_answers(16);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_invalid_max_pending_rejected() {
+    printf("=== test_invalid_max_pending_rejected ===\n");
+
+    const char *invalid[] = {"-1", "abc", "", "12x", "99999999999999999999999"};
+    for (const char *value : invalid) {
+        assert(init_with_max_pending(value) == RUNTIME_STATUS_INVALID_ARGUMENT);
+        assert(strstr(runtime_get_error(), "max_pending_requests") != nullptr);
+        assert(runtime_get_info() == nullptr);  // left uninitialized
+    }
+    assert(init_with_max_pending("8") == RUNTIME_STATUS_SUCCESS);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_cleanup_frees_pending() {
+    printf("=== test_cleanup_frees_pending ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    enqueue_accepted(0, 40);
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);  // ASan reports any input it did not free
+
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+    first_output_byte_per_model(1);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+static void test_info_counts_pending() {
+    printf("=== test_info_counts_pending ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    enqueue_accepted(0, 40);
+    const char *info = runtime_get_info();
+    assert(strstr(info, "\"requests_in_flight\": 40") != nullptr);
+    assert(strstr(info, "\"pending_requests\": 24") != nullptr);
+    expect_answers(40);
+    assert(strstr(runtime_get_info(), "\"requests_in_flight\": 0") != nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// DX-RT rejecting a queued request answers it with an error; rejecting a new one returns the error.
+static void test_rejected_submission_answered() {
+    printf("=== test_rejected_submission_answered ===\n");
+
+    Config cfg = {0, nullptr, nullptr};
+    assert(runtime_init(cfg) == RUNTIME_STATUS_SUCCESS);
+    ModelConfig mc = file_model("dummy.dxnn");
+    assert(runtime_load_models(1, &mc) == RUNTIME_STATUS_SUCCESS);
+
+    dxrt::run_async_failures().store(1);
+    Tensors *input = make_input(0);
+    assert(runtime_enqueue_input(0, input) == RUNTIME_STATUS_INFERENCE_ERROR);
+    free_output(input);  // caller keeps ownership on failure
+
+    enqueue_accepted(0, 17);  // request 16 waits for a buffer
+    dxrt::run_async_failures().store(1);
+    std::vector<int> times_seen(17, 0);
+    for (int i = 0; i < 17; i++) {
+        int mid = -1;
+        Tensors *output = nullptr;
+        const RuntimeStatus s = runtime_retrieve_output(&mid, &output, 2000);
+        assert(mid == 0);
+        if (s == RUNTIME_STATUS_INFERENCE_ERROR) {
+            assert(output == nullptr && strstr(runtime_get_error(), "request 16") != nullptr);
+            times_seen[16]++;
+            continue;
+        }
+        assert(s == RUNTIME_STATUS_SUCCESS && output->id >= 0 && output->id < 16);
+        times_seen[output->id]++;
+        free_output(output);
+    }
+    for (int n : times_seen) assert(n == 1);
+    assert(strstr(runtime_get_info(), "\"requests_in_flight\": 0") != nullptr);
+
+    assert(runtime_cleanup() == RUNTIME_STATUS_SUCCESS);
+    printf("  PASSED\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -898,10 +1073,17 @@ int main() {
     test_second_load_rejected();
     test_failed_load_rolls_back();
     test_load_exception_rolls_back();
-    test_concurrent_producers_two_models();
+    test_concurrent_producers_no_retry();
     test_backpressure_isolated();
     test_info_counts_unretrieved();
     test_cleanup_multi_model_wakes_retriever();
+    test_enqueue_beyond_pool_is_queued();
+    test_pending_queue_full_returns_timeout();
+    test_max_pending_zero_keeps_old_behaviour();
+    test_invalid_max_pending_rejected();
+    test_cleanup_frees_pending();
+    test_info_counts_pending();
+    test_rejected_submission_answered();
 
     remove("dummy.dxnn");
     printf("\n====== ALL TESTS PASSED ======\n\n");

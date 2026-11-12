@@ -62,7 +62,7 @@ DeepX NPU (DX-M1 / DX-H1)
 - **Public C API** (OAAX 2.0, also defines the tensor types): `runtime-library/include/runtime_core.h`
 - **Lifecycle**: `runtime_init()` → `runtime_load_models()` → `runtime_enqueue_input()` / `runtime_retrieve_output()` (loop) → `runtime_cleanup()`
 - **Models**: `runtime_load_models(n)` loads all `n` models or none (model id = array index); each model is read from `model_data`/`model_size` if set, else from `file_path`. Output pools are per model; all outputs share one queue and are returned with their model id.
-- **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool. A full pool returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
+- **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool per model, plus a bounded per-model pending queue (`max_pending_requests` init key, default 256) for requests beyond it, submitted as outputs are retrieved. Pool and queue both full returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
 - **Logging**: spdlog (vendored under `runtime-library/deps/`, see `THIRD_PARTY_NOTICES.md`); log file is `./runtime.log` unless `DEEPX_RUNTIME_LOG_FILE` is set
 - **Build standard**: C++11, CMake 3.14+
 - **DX-RT version pin**: `runtime-library/dxrt_version.txt` (Linux source) and `runtime-library/dxrt_windows_commit.txt` (Windows SDK)

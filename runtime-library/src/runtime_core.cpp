@@ -25,15 +25,27 @@
 //     squeezenet1_1) after any DX-RT upgrade.
 //   - Each model has its own output buffer pool, grown lazily up to
 //     dxrt_get_task_max_load() × NumDevice buffers of that model's output
-//     size, matching DX-RT's own in-flight limit.  It caps memory and applies
-//     backpressure without manual tuning: a 1-channel setup uses a tiny pool,
-//     a 32-channel quad-H1 setup a large one.  The worst case grows with the
-//     number of models, and a full pool rejects (TIMEOUT) only its own model.
+//     size, matching DX-RT's own in-flight limit.  It caps memory without
+//     manual tuning: a 1-channel setup uses a tiny pool, a 32-channel quad-H1
+//     setup a large one.  The worst case grows with the number of models.
+//   - A request holds an output buffer from submission to DX-RT until it is
+//     retrieved.  A request accepted while its model's pool is full waits in
+//     that model's pending FIFO (the request itself, still zero-copy) and is
+//     submitted, oldest first, by the runtime_retrieve_output call that frees
+//     a buffer; no extra thread is involved.  The FIFO holds at most
+//     max_pending_requests (runtime_init config key, default 256; 0 disables
+//     it).  When pool and FIFO are both full, enqueue returns TIMEOUT
+//     (backpressure: the caller keeps the input), for that model only.
+//   - If DX-RT rejects a request (RunAsync throws), enqueue returns
+//     INFERENCE_ERROR when it was submitted right away.  A pending request was
+//     already accepted, so it is answered instead: it keeps its buffer and
+//     goes to the output queue, and runtime_retrieve_output returns
+//     INFERENCE_ERROR with its model id and the request id in the error text.
+//     Either way each accepted request is answered exactly once.
 //   - Each job holds a reference to its ModelContext, so the context (and its
 //     pool) outlives every job of that model, even across runtime_cleanup.
-//   - A request holds an output buffer from enqueue until it is retrieved, so
-//     runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
-//     the number of pool buffers in use.
+//   - runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
+//     the number of pool buffers in use plus the pending requests.
 
 #include "runtime_core.h"
 
@@ -51,7 +63,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -73,11 +87,11 @@ struct JobData {
     // Keeps the model's context (and so its output pool) alive until the job is
     // retrieved or drained, even if runtime_cleanup unloads the model meanwhile.
     std::shared_ptr<ModelContext> ctx;
-    int model_id;
-    int request_id;
-    Tensors *input_tensors;  // caller's input; owned here, freed in completion callback
-    void *outputs_ptr;
+    int request_id{0};
+    Tensors *input_tensors{nullptr};  // caller's input; owned here, freed in completion callback
+    void *outputs_ptr{nullptr};       // set when the job is submitted
     dxrt::TensorPtrs dxrt_outputs;
+    bool rejected{false};  // DX-RT rejected the pending job; answered with an error
 };
 
 // ---------------------------------------------------------------------------
@@ -136,11 +150,23 @@ private:
 };
 
 struct ModelContext {
+    int model_id{0};
     std::unique_ptr<dxrt::InferenceEngine> engine;
     std::vector<uint64_t> output_sizes;
     size_t input_size{0};
     std::unique_ptr<BufferPool> output_pool;
 
+    // Accepted jobs waiting for an output buffer, oldest first.  pending_mtx
+    // also guards `closed` and orders every output_pool acquire and release
+    // with the FIFO, so a freed buffer goes to the oldest pending job first.
+    std::mutex pending_mtx;
+    std::deque<JobData *> pending;
+    size_t max_pending{0};
+    bool closed{false};  // set by runtime_cleanup: no job is submitted anymore
+
+    // Jobs submitted to DX-RT whose callback has not finished.  Incremented
+    // under pending_mtx, so runtime_cleanup, which closes the model first,
+    // waits for every submission that got past `closed`.
     std::atomic<int> in_flight{0};
     std::mutex in_flight_mtx;
     std::condition_variable in_flight_cv;
@@ -163,6 +189,10 @@ std::mutex g_models_mtx;
 // blocked meanwhile.  Lock order: g_load_mtx, then g_models_mtx.
 std::mutex g_load_mtx;
 
+// Per-model capacity of the pending FIFO; set by runtime_init.
+constexpr size_t kDefaultMaxPendingRequests = 256;
+size_t g_max_pending_requests = kDefaultMaxPendingRequests;
+
 // Lock-free MPMC queue of completed jobs.  DX-RT completion callbacks (many
 // threads) enqueue; retrieve() consumers (many threads) dequeue — neither side
 // serializes on a shared mutex, removing the single-lock contention that the
@@ -183,6 +213,20 @@ std::mutex g_error_mtx;
 void set_error(const std::string &msg) {
     std::lock_guard<std::mutex> lk(g_error_mtx);
     g_last_error = msg;
+}
+
+// Parses a non-negative decimal integer that fits in size_t.
+bool parse_size(const char *text, size_t *out) {
+    if (!text || !*text) return false;
+    size_t value = 0;
+    for (; *text; ++text) {
+        if (*text < '0' || *text > '9') return false;
+        const size_t digit = static_cast<size_t>(*text - '0');
+        if (value > (std::numeric_limits<size_t>::max() - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +344,7 @@ size_t compute_pool_capacity() {
 // ---------------------------------------------------------------------------
 
 // Records and logs a failure of the model at `index` of runtime_load_models'
-// list as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
+// list (its model id) as "model[<index>]: <msg><detail>", and returns `status`.  Never throws:
 // it also reports exceptions such as std::bad_alloc, so if recording fails
 // the status is still returned.
 RuntimeStatus model_error(int index, RuntimeStatus status, const char *msg, const char *detail = "") noexcept {
@@ -325,6 +369,66 @@ RuntimeStatus model_exception_error(int index) noexcept {
         return model_error(index, RUNTIME_STATUS_ERROR, "Unexpected exception: ", e.what());
     } catch (...) {
         return model_error(index, RUNTIME_STATUS_UNKNOWN_ERROR, "Unexpected non-standard exception");
+    }
+}
+
+// Hands a finished job to runtime_retrieve_output.
+void deliver(JobData *jd) {
+    g_output_queue.enqueue(jd);  // lock-free push, then signal a waiting consumer
+    g_output_sem.signal();
+}
+
+// Ends a job's in-flight count; runtime_cleanup waits for zero.  Call after
+// the job was delivered, so a drained model has nothing left to deliver.
+void finish_in_flight(ModelContext &ctx) {
+    // The atomic itself is the source of truth; we only take the lock + notify
+    // on the 0-transition, which is all cleanup waits for.  This keeps the
+    // steady-state completion path lock-free.
+    if (ctx.in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lk(ctx.in_flight_mtx);
+        ctx.in_flight_cv.notify_all();
+    }
+}
+
+// Submits a job whose output buffer is set and which is already counted in
+// in_flight.  Returns false if DX-RT rejects it (error recorded and logged);
+// the job then still owns its input and buffer and is still in flight.
+bool submit(JobData *jd) noexcept {
+    ModelContext &ctx = *jd->ctx;
+    try {
+        // Zero-copy: DX-RT reads the caller's input asynchronously, so the
+        // JobData keeps it alive until the completion callback.
+        ctx.engine->RunAsync(jd->input_tensors->tensors[0].data, jd, jd->outputs_ptr);
+        return true;
+    } catch (const std::exception &e) {
+        model_error(ctx.model_id, RUNTIME_STATUS_INFERENCE_ERROR, "RunAsync failed: ", e.what());
+    } catch (...) {
+        model_error(ctx.model_id, RUNTIME_STATUS_INFERENCE_ERROR, "RunAsync failed with a non-standard exception");
+    }
+    return false;
+}
+
+// Returns a retrieved job's output buffer: it goes to the model's oldest
+// pending job, which is submitted, or back to the pool.
+void release_output(ModelContext &ctx, void *buffer) {
+    JobData *next = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(ctx.pending_mtx);
+        if (ctx.closed || ctx.pending.empty()) {
+            ctx.output_pool->release(buffer);
+            return;
+        }
+        next = ctx.pending.front();
+        ctx.pending.pop_front();
+        next->outputs_ptr = buffer;
+        ctx.in_flight.fetch_add(1, std::memory_order_acq_rel);
+    }
+    if (!submit(next)) {
+        // Already accepted: answer it with an error (it keeps the buffer
+        // until retrieved, like any other job).
+        next->rejected = true;
+        deliver(next);
+        finish_in_flight(ctx);
     }
 }
 
@@ -353,6 +457,8 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
     }
 
     std::unique_ptr<ModelContext> ctx(new ModelContext());
+    ctx->model_id = index;
+    ctx->max_pending = g_max_pending_requests;
     try {
         // DX-RT copies what it needs from model_data while constructing the
         // engine, so the caller may free its buffer once this call returns.
@@ -383,22 +489,11 @@ RuntimeStatus create_model_context(const ModelConfig &mc, int index, std::unique
             // Inference is complete, so DX-RT's asynchronous input encoding
             // has already read the caller's input.  Release it now (zero-copy
             // path: nothing was copied at enqueue time).
-            if (jd->input_tensors) {
-                deep_free_tensors(jd->input_tensors);
-                jd->input_tensors = nullptr;
-            }
-            // Lock-free push, then signal a waiting consumer.
-            g_output_queue.enqueue(jd);
-            g_output_sem.signal();
+            deep_free_tensors(jd->input_tensors);
+            jd->input_tensors = nullptr;
+            deliver(jd);
         }
-        // Decrement in-flight count.  The atomic itself is the source of
-        // truth; we only take the lock + notify on the 0-transition, which
-        // is all cleanup waits for.  This keeps the steady-state completion
-        // path lock-free (the common N->N-1 case touches only the atomic).
-        if (ctx_raw->in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard<std::mutex> lk(ctx_raw->in_flight_mtx);
-            ctx_raw->in_flight_cv.notify_all();
-        }
+        finish_in_flight(*ctx_raw);
         return 0;
     });
 
@@ -417,6 +512,16 @@ RuntimeStatus runtime_init(Config config) {
         set_error("Runtime already initialized");
         return RUNTIME_STATUS_ALREADY_INITIALIZED;
     }
+
+    size_t max_pending = kDefaultMaxPendingRequests;
+    for (int i = 0; i < config.length; ++i) {
+        if (config.keys[i] && std::strcmp(config.keys[i], "max_pending_requests") == 0 &&
+            !parse_size(config.values[i], &max_pending)) {
+            set_error("max_pending_requests must be a non-negative integer");
+            return RUNTIME_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    g_max_pending_requests = max_pending;
 
     // Enable DX-RT dynamic CPU threading by default.  When a model has CPU
     // tasks (run via ONNX Runtime), a fixed thread pool can become the
@@ -548,51 +653,47 @@ RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
         return RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH;
     }
 
-    // Non-blocking acquire of an output buffer.  On exhaustion we signal
-    // backpressure with RUNTIME_STATUS_TIMEOUT — the only standard OAAX 2.0
-    // status meaning "retry later" (the enum must not be extended) — so the
-    // caller drops this frame instead of blocking.  Ownership of input_tensors
-    // stays with the caller on any non-success return.
-    void *outputs_ptr = ctx->output_pool->try_acquire();
-    if (!outputs_ptr) {
-        set_error("Output pool exhausted (backpressure)");
-        return RUNTIME_STATUS_TIMEOUT;
+    // Ownership of input_tensors stays with the caller on any non-success
+    // return; on success the JobData owns it.
+    std::unique_ptr<JobData> jd;
+    try {
+        jd.reset(new JobData());
+        jd->ctx = ctx;
+        jd->request_id = input_tensors->id;
+        jd->input_tensors = input_tensors;
+
+        // Take a free output buffer, unless older requests are waiting for
+        // one; otherwise queue the request.  Never blocks on the device.
+        std::lock_guard<std::mutex> lk(ctx->pending_mtx);
+        if (ctx->closed) {
+            set_error("Runtime is shutting down");
+            return RUNTIME_STATUS_ERROR;
+        }
+        if (ctx->pending.empty()) jd->outputs_ptr = ctx->output_pool->try_acquire();
+        if (jd->outputs_ptr) {
+            ctx->in_flight.fetch_add(1, std::memory_order_acq_rel);
+        } else if (ctx->pending.size() < ctx->max_pending) {
+            ctx->pending.push_back(jd.get());
+            jd.release();
+            return RUNTIME_STATUS_SUCCESS;
+        } else {
+            // Backpressure: TIMEOUT is the only standard OAAX 2.0 status
+            // meaning "retry later" (the enum must not be extended), so the
+            // caller can drop this frame instead of blocking.
+            set_error("Output pool and pending queue full (backpressure)");
+            return RUNTIME_STATUS_TIMEOUT;
+        }
+    } catch (const std::bad_alloc &) {
+        set_error("Out of memory");
+        return RUNTIME_STATUS_OUT_OF_MEMORY;
     }
 
-    // Zero-copy: hand the caller's input buffer directly to RunAsync.  DX-RT
-    // reads it asynchronously (input encoding runs on its worker threads after
-    // RunAsync returns), so the buffer must stay alive until completion — we
-    // transfer ownership to the JobData and free it in the callback.
-    void *input_data = input_tensors->tensors[0].data;
-
-    auto jd = std::unique_ptr<JobData>(new JobData());
-    jd->ctx = ctx;
-    jd->model_id = model_id;
-    jd->request_id = input_tensors->id;
-    jd->input_tensors = input_tensors;
-    jd->outputs_ptr = outputs_ptr;
-
-    ctx->in_flight.fetch_add(1, std::memory_order_acq_rel);
-
-    try {
-        ctx->engine->RunAsync(input_data, jd.get(), outputs_ptr);
-    } catch (const std::exception &e) {
-        ctx->in_flight.fetch_sub(1, std::memory_order_acq_rel);
-        {
-            std::lock_guard<std::mutex> lk(ctx->in_flight_mtx);
-            ctx->in_flight_cv.notify_all();
-        }
-        ctx->output_pool->release(outputs_ptr);
-        const std::string msg = std::string("RunAsync failed: ") + e.what();
-        set_error(msg);
-        spdlog::error("{}", msg);
-        // Caller retains ownership of input_tensors on failure — do not free.
+    if (!submit(jd.get())) {
+        release_output(*ctx, jd->outputs_ptr);
+        finish_in_flight(*ctx);
         return RUNTIME_STATUS_INFERENCE_ERROR;
     }
-
-    // RunAsync took ownership of the JobData (via userArg).  The JobData now
-    // owns input_tensors and frees them in the completion callback, once DX-RT
-    // has finished reading the input.
+    // DX-RT holds the JobData (userArg) until the completion callback.
     jd.release();
     return RUNTIME_STATUS_SUCCESS;
 }
@@ -622,21 +723,29 @@ RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, i
         std::this_thread::yield();
     }
 
-    Tensors *result = build_output_tensors(*jd->ctx, jd->request_id, jd->dxrt_outputs);
+    const std::unique_ptr<JobData> job(jd);
+    if (model_id) *model_id = job->ctx->model_id;
+    Tensors *result = nullptr;
+    if (job->rejected) {
+        deep_free_tensors(job->input_tensors);  // never reached DX-RT
+    } else {
+        result = build_output_tensors(*job->ctx, job->request_id, job->dxrt_outputs);
+    }
 
-    // Return the output buffer to its pool regardless of build outcome.  The
+    // Hand the output buffer on regardless of the outcome.  A completed job's
     // input was already freed in the completion callback (zero-copy path).
-    jd->ctx->output_pool->release(jd->outputs_ptr);
-    const int mid = jd->model_id;
-    delete jd;
+    release_output(*job->ctx, job->outputs_ptr);
 
+    if (job->rejected) {
+        set_error("model[" + std::to_string(job->ctx->model_id) + "]: request " + std::to_string(job->request_id) +
+                  " was rejected by DX-RT (see log)");
+        return RUNTIME_STATUS_INFERENCE_ERROR;
+    }
     if (!result) {
         set_error("Failed to build output tensors");
         return RUNTIME_STATUS_OUT_OF_MEMORY;
     }
-
     *output_tensors = result;
-    if (model_id) *model_id = mid;
     return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -649,10 +758,21 @@ RuntimeStatus runtime_cleanup(void) {
     g_shutting_down.store(true);
     g_output_sem.wake_all();
 
-    // 1) Wait for every in-flight job to complete (callback fired).
+    // 1) Stop submissions, free the requests never submitted, and wait for
+    //    every in-flight job to complete (callback fired).
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         for (auto &ctx : g_models) {
+            std::deque<JobData *> pending;
+            {
+                std::lock_guard<std::mutex> plk(ctx->pending_mtx);
+                ctx->closed = true;
+                pending.swap(ctx->pending);
+            }
+            for (JobData *jd : pending) {
+                deep_free_tensors(jd->input_tensors);
+                delete jd;
+            }
             std::unique_lock<std::mutex> wlk(ctx->in_flight_mtx);
             ctx->in_flight_cv.wait(wlk, [&] { return ctx->in_flight.load() == 0; });
         }
@@ -666,12 +786,12 @@ RuntimeStatus runtime_cleanup(void) {
         }
     }
 
-    // 3) Free the outputs nobody retrieved.  (Callbacks decrement in_flight
-    //    last, so every completed job is already in the queue.)
+    // 3) Free the outputs nobody retrieved.  (Jobs are delivered before
+    //    in_flight is decremented, so every finished job is already queued.)
     {
         JobData *jd = nullptr;
         while (g_output_queue.try_dequeue(jd)) {
-            if (jd->input_tensors) deep_free_tensors(jd->input_tensors);
+            deep_free_tensors(jd->input_tensors);  // set for a rejected job
             jd->ctx->output_pool->release(jd->outputs_ptr);
             delete jd;
         }
@@ -725,29 +845,32 @@ const char *runtime_get_info(void) {
     size_t pool_in_use = 0;
     size_t pool_size = 0;
     size_t pool_capacity = 0;
+    size_t pending = 0;
     {
         std::lock_guard<std::mutex> lk(g_models_mtx);
         loaded = g_models.size();
         for (auto &ctx : g_models) {
-            if (ctx->output_pool) {
-                pool_in_use += ctx->output_pool->in_use();
-                pool_size += ctx->output_pool->allocated();
-                pool_capacity += ctx->output_pool->capacity();
-            }
+            // pending_mtx: a buffer passing to a pending job is counted once.
+            std::lock_guard<std::mutex> plk(ctx->pending_mtx);
+            pool_in_use += ctx->output_pool->in_use();
+            pool_size += ctx->output_pool->allocated();
+            pool_capacity += ctx->output_pool->capacity();
+            pending += ctx->pending.size();
         }
     }
     // size_approx() is a lock-free estimate — exact counts aren't possible (or
     // needed) for a concurrently-mutated lock-free queue.
     size_t queued = g_output_queue.size_approx();
 
-    // A request holds its output buffer from enqueue until it is retrieved, so
-    // requests_in_flight (accepted, not yet retrieved) is pool_in_use.
+    // A submitted request holds its output buffer until it is retrieved, so
+    // requests_in_flight (accepted, not yet retrieved) is pool_in_use plus the
+    // pending requests.
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "{\"loaded_models\": %zu, \"requests_in_flight\": %zu, "
-                  "\"output_queue\": %zu, \"pool_in_use\": %zu, "
+                  "\"pending_requests\": %zu, \"output_queue\": %zu, \"pool_in_use\": %zu, "
                   "\"pool_size\": %zu, \"pool_capacity\": %zu}",
-                  loaded, pool_in_use, queued, pool_in_use, pool_size, pool_capacity);
+                  loaded, pool_in_use + pending, pending, queued, pool_in_use, pool_size, pool_capacity);
     // Per-thread storage so concurrent callers don't overwrite each other's string.
     static thread_local std::string info_json;
     info_json = buf;

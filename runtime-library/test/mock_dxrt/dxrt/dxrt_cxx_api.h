@@ -39,6 +39,12 @@ inline std::atomic<int> &register_callback_throws_after() {
     return v;
 }
 
+// Test knob: this many of the next RunAsync calls throw std::runtime_error.
+inline std::atomic<int> &run_async_failures() {
+    static std::atomic<int> v{0};
+    return v;
+}
+
 class Tensor {
 public:
     Tensor(size_t size, uint8_t fill) : data_buf_(malloc(size)), size_(size) {
@@ -99,6 +105,10 @@ public:
     // Completes asynchronously on a worker thread (5~15 ms simulated latency) and
     // invokes the registered callback, like DX-RT's completion threads do.
     int RunAsync(void *, void *userArg, void *) {
+        int failures = run_async_failures().load();
+        while (failures > 0 && !run_async_failures().compare_exchange_weak(failures, failures - 1)) {
+        }
+        if (failures > 0) throw std::runtime_error("mock: RunAsync failed");
         const int job_id = next_job_id_.fetch_add(1);
         std::lock_guard<std::mutex> lk(mtx_);
         threads_.emplace_back([this, job_id, userArg]() {

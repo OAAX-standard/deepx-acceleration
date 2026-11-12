@@ -9,9 +9,10 @@
 //
 // Behavior:
 //   - try_acquire() returns a pooled buffer immediately, or nullptr if the
-//     pool is empty and already at its hard cap.  It never blocks: the runtime
-//     turns a nullptr into RUNTIME_STATUS_TIMEOUT (backpressure) so callers can
-//     drop the frame instead of stalling, per the OAAX non-blocking contract.
+//     pool is empty and already at its hard cap.  It never blocks, so the
+//     runtime can queue the request or apply backpressure instead of stalling,
+//     per the OAAX non-blocking contract.  It throws std::bad_alloc if a new
+//     buffer cannot be allocated.
 //   - release() returns the buffer to the pool for reuse; buffers are not
 //     freed until the pool itself is destroyed.
 //   - shutdown() makes subsequent try_acquire() calls fail during cleanup.
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <queue>
 
 class BufferPool {
@@ -43,6 +45,7 @@ public:
 
     // Returns a buffer of buf_size bytes immediately, or nullptr if the pool is
     // exhausted (at hard cap with none free) or shut down.  Never blocks.
+    // Throws std::bad_alloc if allocating a new buffer fails.
     void *try_acquire() {
         std::lock_guard<std::mutex> lk(mtx_);
         if (shutting_down_) return nullptr;
@@ -53,10 +56,9 @@ public:
         }
         if (allocated_ >= hard_cap_) return nullptr;
         void *p = std::malloc(buf_size_);
-        if (p) {
-            std::memset(p, 0, buf_size_);
-            ++allocated_;
-        }
+        if (!p) throw std::bad_alloc();
+        std::memset(p, 0, buf_size_);
+        ++allocated_;
         return p;
     }
 
