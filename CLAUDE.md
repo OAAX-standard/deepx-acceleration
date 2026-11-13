@@ -14,11 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Runtime Library — Linux
 
 ```bash
+cd runtime-library  # the script must be run from this directory
 # Build for host architecture (inside Docker)
-./runtime-library/build-runtimes.sh --ubuntu_version 22.04
+./build-runtimes.sh --ubuntu_version 22.04
 
 # Cross-compile aarch64 on x86_64 host
-./runtime-library/build-runtimes.sh --ubuntu_version 22.04 --cross-aarch64
+./build-runtimes.sh --ubuntu_version 22.04 --cross-aarch64
 ```
 
 Supported `--ubuntu_version` values: `20.04`, `22.04`, `24.04`.  
@@ -27,10 +28,16 @@ Output: `runtime-library/artifacts/{arch}-ubuntu{version}/`.
 ### Runtime Library — Windows
 
 ```powershell
-./runtime-library/build-windows.ps1 -DxrtRoot "path/to/dx_rt_sdk" -Configuration Release
+# Against the installed DX-SDK Windows Installer (1.3.2+, DX-RT 3.5.0)
+./runtime-library/build-windows.ps1 -DxrtRoot $env:DEEPX_M1_DIR
+# Or omit -DxrtRoot to build the public dx_rt source cloned into runtime-library/dx_rt first (what CI does)
+./runtime-library/build-windows.ps1
+
+# inference_runner.exe against the built DLL
+./tests/runtime/build-tests.ps1
 ```
 
-Requires Visual Studio 2022. Output: `runtime-library/artifacts/x86_64-windows/RuntimeLibrary.dll`.
+Requires Visual Studio 2022. Output: `runtime-library/artifacts/x86_64-windows/` (`RuntimeLibrary.dll`, import library `RuntimeLibrary.lib`, `library-dxrt-v<ver>.tar.gz`). `dxrt.dll` is never bundled; at run time it comes from the installer's `bin` on `PATH`.
 
 ### Conversion Toolchain
 
@@ -60,15 +67,17 @@ DeepX NPU (DX-M1 / DX-H1)
 - **Entry point**: `runtime-library/src/runtime_core.cpp`
 - **Public C API** (OAAX 2.0, also defines the tensor types): `runtime-library/include/runtime_core.h`
 - **Lifecycle**: `runtime_init()` → `runtime_load_models()` → `runtime_enqueue_input()` / `runtime_retrieve_output()` (loop) → `runtime_cleanup()`
-- **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool. A full pool returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
+- **Models**: `runtime_load_models(n)` loads all `n` models or none (model id = array index); each model is read from `model_data`/`model_size` if set, else from `file_path`. Output pools are per model; all outputs share one queue and are returned with their model id.
+- **Design**: callback-based (`InferenceEngine::RegisterCallback`), zero-copy input, lock-free output queue, bounded output buffer pool per model, plus a bounded per-model pending queue (`max_pending_requests` init key, default 256) for requests beyond it, submitted as outputs are retrieved. Pool and queue both full returns `RUNTIME_STATUS_TIMEOUT` (backpressure — the caller keeps the input and retries/drops). Details in the header comment of `runtime_core.cpp`.
 - **Logging**: spdlog (vendored under `runtime-library/deps/`, see `THIRD_PARTY_NOTICES.md`); log file is `./runtime.log` unless `DEEPX_RUNTIME_LOG_FILE` is set
-- **Build standard**: C++11, CMake 3.14+
-- **DX-RT version pin**: `runtime-library/dxrt_version.txt` (Linux source) and `runtime-library/dxrt_windows_commit.txt` (Windows SDK)
+- **Build standard**: C++14 (required by the DX-RT C++ header), CMake 3.14+
+- **DX-RT version pin**: `runtime-library/dxrt_version.txt` (public `dx_rt` tag, Linux and Windows)
+- **Exports**: only the 9 `runtime_*` functions — Linux via `runtime_core.map` + hidden visibility, Windows via `RUNTIME_API` (`__declspec(dllexport)`)
 - **Unit tests** (no hardware): `runtime-library/test/` builds `runtime_core.cpp` against a mock DX-RT (`test/mock_dxrt/`) — keep the mock in sync with the DX-RT calls the runtime makes
 
 ### Conversion Toolchain internals
 
-- Docker image based on `python:3.11-slim`. DX-COM (`dxcom` CLI) is pip-installed from the `sdk.deepx.ai` wheel at image build time (`DX_COM_VERSION` build arg, default 2.3.0).
+- Docker image based on `python:3.11-slim`. DX-COM (`dxcom` CLI) is pip-installed from the `sdk.deepx.ai` wheel at image build time (`DX_COM_VERSION` build arg, default 2.5.0).
 - Input to conversion: a ZIP containing the ONNX model, a JSON config, and (optionally) a calibration dataset.
 - Main conversion script executed inside the container: `conversion-toolchain/scripts/convert.sh`.
 
@@ -98,7 +107,7 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `build.yml` | push/PR to `main`, `v*` tag | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24; the Windows x86_64 job is disabled with `if: false` until Windows is supported); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner); then `publish` (see below) |
+| `build.yml` | push/PR to `main`, `v*` tag | `unit-tests` (mock-DX-RT runtime tests incl. ASan/UBSan, `test_models.py`) and `unit-tests-windows` (the same mock tests with MSVC); builds toolchain image; matrix runtime builds (Linux x86_64+aarch64 × Ubuntu 20/22/24) and the Windows x86_64 build (`windows-2022`: the public `dx_rt` source is built first, its vcpkg packages cached); `integration-tests` is **opt-in** (repo variable `RUN_INTEGRATION_TESTS=true`; stage 2 also needs `RUN_STAGE2=true` and DeepX hardware on the runner); then `publish` (see below) |
 | `lint.yml` | push/PR to `main` | Runs pre-commit hooks (ruff, clang-format, shellcheck, hadolint) |
 | `delete-temporary-artifacts.yml` | PR closed | Removes the PR's `<branch>/` artifacts from S3 (never a release-looking name) |
 

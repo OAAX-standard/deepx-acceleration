@@ -26,11 +26,17 @@ endif()
 
 # DXRT
 if (WIN32)
-    # On Windows, dx_rt is provided as a prebuilt SDK; use DXRT_ROOT to locate it
-    set(DXRT_ROOT "" CACHE PATH "Path to DX-RT Windows SDK (must contain include/ and lib/)")
+    # The DX-RT SDK: the DX-SDK Windows Installer's install directory, or dx_rt built from source
+    # and installed (see build-windows.ps1).  Both have include/dxrt/, lib/dxrt.lib, lib/cmake/dxrt/.
+    set(DXRT_ROOT "" CACHE PATH "DX-RT SDK directory (contains include/dxrt/ and lib/cmake/dxrt/)")
     if (NOT DXRT_ROOT)
-        message(FATAL_ERROR "DXRT_ROOT is not set. Please configure it with -DDXRT_ROOT=PATH to the DX-RT Windows SDK.")
+        message(FATAL_ERROR "DXRT_ROOT is not set. Configure with -DDXRT_ROOT=<DX-RT SDK directory>.")
     endif()
+    if (POLICY CMP0144)
+        cmake_policy(SET CMP0144 NEW)  # DXRT_ROOT is meant as dxrt's root (searched explicitly below anyway)
+    endif()
+    find_package(dxrt REQUIRED CONFIG PATHS "${DXRT_ROOT}" NO_DEFAULT_PATH)
+    message(STATUS "dxrt: ${DXRT_LIBRARY}")
     # Silence MSVC "unsafe" CRT and POSIX name deprecation warnings for third-party C utilities
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
 else()
@@ -63,9 +69,13 @@ target_compile_definitions(RuntimeLibrary PRIVATE RUNTIME_LIBRARY_EXPORTS)
 
 # Set C++ standard
 set_target_properties(RuntimeLibrary PROPERTIES
-    CXX_STANDARD 11
+    CXX_STANDARD 14
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
+    # Export only the functions marked RUNTIME_API
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
 )
 
 # Include directories
@@ -75,31 +85,23 @@ target_include_directories(RuntimeLibrary
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/include
 )
 
+# Link libraries (on Windows the SDK's imported target, which also adds its include directory)
 if (WIN32)
-    target_include_directories(RuntimeLibrary
-        PRIVATE
-            ${DXRT_ROOT}/include
-    )
+    target_link_libraries(RuntimeLibrary PRIVATE dxrt::dxrt)
+else()
+    target_link_libraries(RuntimeLibrary PRIVATE dxrt)
 endif()
-
-# Link libraries
-target_link_libraries(RuntimeLibrary
-    PRIVATE
-        dxrt
-        Threads::Threads
-)
-
-if (WIN32)
-    # Link against dxrt.lib from the SDK
-    target_link_directories(RuntimeLibrary
-        PRIVATE
-            ${DXRT_ROOT}/lib
-    )
-endif()
+target_link_libraries(RuntimeLibrary PRIVATE Threads::Threads)
 
 # Linker flags (basic flags, specific version compatibility should be handled by toolchain)
 if (UNIX)
     set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--as-needed -Wl,--hash-style=gnu")
+
+    # libstdc++ template instantiations keep default visibility regardless of the presets above,
+    # so a version script is what limits the dynamic symbol table to the OAAX API.
+    set_property(TARGET RuntimeLibrary APPEND_STRING PROPERTY LINK_FLAGS
+        " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/runtime_core.map")
+    set_property(TARGET RuntimeLibrary APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/runtime_core.map)
 endif()
 
 # Install rules

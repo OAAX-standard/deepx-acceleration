@@ -71,6 +71,26 @@ jobs:
           pip install pytest
           pytest tests/test_models.py
 
+  # The same mock DX-RT unit tests built with MSVC, so Windows-only breakage shows up without the DX-RT SDK.
+  unit-tests-windows:
+    timeout-minutes: 15
+    runs-on: windows-2022  # provides the Visual Studio 2022 generator used below
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Runtime unit tests (mock DX-RT, MSVC)
+        shell: pwsh
+        run: |
+          cmake -S runtime-library/test -B build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --config Debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          build\Debug\test_runtime.exe
+
   build-runtime-ubuntu:
     timeout-minutes: 20
     runs-on: ubuntu-latest
@@ -117,16 +137,13 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Builds DX-RT from the public dx_rt source (the DX-SDK Windows Installer needs a login), then the DLL against it.
   build-runtime-windows:
-    # Disabled: Windows is not supported yet (the DX-RT Windows SDK repo is not
-    # publicly cloneable from CI). Remove this line to re-enable.
-    if: false
-    timeout-minutes: 10
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        arch: ["x86_64"]
-      fail-fast: false
+    name: Build runtime for x86_64-windows
+    timeout-minutes: 60  # includes building DX-RT
+    runs-on: windows-2022  # build-windows.ps1 uses Visual Studio 2022
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
 
     steps:
       - name: Checkout
@@ -137,28 +154,21 @@ jobs:
       - name: Download DX RT
         shell: pwsh
         run: |
-          cd runtime-library
-          $dxrt_windows_commit = Get-Content ./dxrt_windows_commit.txt
-          git clone https://github.com/DEEPX-AI/dx_rt_windows.git
-          cd dx_rt_windows
-          git checkout $dxrt_windows_commit
-          cd ..
+          $tag = "v" + (Get-Content runtime-library/dxrt_version.txt -Raw).Trim()
+          git clone --depth 1 --branch $tag https://github.com/DEEPX-AI/dx_rt.git runtime-library/dx_rt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      # DX-RT's vcpkg dependencies (gtest), built once per dx_rt manifest.
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-windows-${{ hashFiles('runtime-library/dx_rt/vcpkg.json', 'runtime-library/dx_rt/vcpkg-configuration.json') }}
 
       - name: Compile runtime
         shell: pwsh
-        run: |
-          cd runtime-library
-          $m1Dir = Join-Path "dx_rt_windows" "m1"
-          $dxrtRoot = $null
-          foreach ($v in (Get-ChildItem -Path $m1Dir -Directory)) {
-            $candidate = Join-Path $v.FullName "dx_rt"
-            if ((Test-Path (Join-Path $candidate "include")) -and (Test-Path (Join-Path $candidate "lib"))) {
-              $dxrtRoot = $candidate
-              break
-            }
-          }
-          if (-not $dxrtRoot) { throw "Could not find dx_rt SDK (include/ and lib/) under dx_rt_windows/m1/" }
-          ./build-windows.ps1 -DxrtRoot $dxrtRoot -Configuration Release
+        run: ./runtime-library/build-windows.ps1 -Configuration Release
 
       # The publish job uploads it (scripts/publish-artifacts.sh picks this artifact up when it exists).
       - name: Keep the runtime for the publish job
@@ -264,15 +274,16 @@ jobs:
     name: Publish to the OAAX bucket
     timeout-minutes: 45
     runs-on: ubuntu-22.04
-    needs: [unit-tests, build-toolchain, build-runtime-ubuntu, build-runtime-windows, integration-tests]
-    # integration-tests (opt-in) and build-runtime-windows (disabled) are skipped, which would skip this job by default.
-    # A PR from a fork has no bucket secrets: the upload step then only lists what it would publish.
+    needs: [unit-tests, unit-tests-windows, build-toolchain, build-runtime-ubuntu, build-runtime-windows, integration-tests]
+    # integration-tests (opt-in) is skipped by default, which would skip this job too.
+    # build-toolchain is skipped for PRs from forks: nothing to publish there.
     if: >-
       ${{ always()
       && needs.unit-tests.result == 'success'
+      && needs.unit-tests-windows.result == 'success'
       && needs.build-toolchain.result == 'success'
       && needs.build-runtime-ubuntu.result == 'success'
-      && contains(fromJSON('["success", "skipped"]'), needs.build-runtime-windows.result)
+      && needs.build-runtime-windows.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.integration-tests.result) }}
     permissions:
       contents: read

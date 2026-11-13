@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 #   ./build-toolchain.sh                      # uses default version
 #   ./build-toolchain.sh 2.4.0                # specify version as argument
 #   DX_COM_VERSION=2.4.0 ./build-toolchain.sh # specify version via env var
-DX_COM_VERSION="${1:-${DX_COM_VERSION:-2.3.0}}"
+DX_COM_VERSION="${1:-${DX_COM_VERSION:-2.5.0}}"
 
 # Ensure the artifacts directory exists
 mkdir -p artifacts

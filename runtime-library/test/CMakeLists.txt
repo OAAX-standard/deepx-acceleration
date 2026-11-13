@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(dx_oaax_test DESCRIPTION "OAAX 2.0 Runtime Test with Mock dxrt")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # The tests rely on assert(); never let a Release build (-DNDEBUG) turn them into no-ops.
@@ -20,7 +20,7 @@ if (MSVC)
 endif()
 
 # Include directories:
-# - mock_dxrt/ overrides real <dxrt/dxrt_api.h>
+# - mock_dxrt/ overrides real <dxrt/dxrt_cxx_api.h>
 # - spdlog from deps
 # - interface_2.h and runtime_core.h from include/
 include_directories(
