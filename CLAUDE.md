@@ -111,7 +111,7 @@ GitHub Actions workflows in `.github/workflows/`:
 | `lint.yml` | push/PR to `main` | Runs pre-commit hooks (ruff, clang-format, shellcheck, hadolint) |
 | `delete-temporary-artifacts.yml` | PR closed | Removes the PR's `<branch>/` artifacts from S3 (never a release-looking name) |
 
-The self-hosted `hetzner` jobs are skipped for PRs from forks. Build jobs pass their output to the tests and to `publish` as GitHub artifacts (the toolchain image is ~6 GB). `publish` runs only after the builds and tests passed and uploads those bytes to the S3-compatible bucket with `scripts/publish-artifacts.sh`:
+The toolchain image is built on a GitHub-hosted runner; only `integration-tests` (opt-in) uses the self-hosted `hetzner` runner and is skipped for PRs from forks. Build jobs pass their output to the tests and to `publish` as GitHub artifacts (the toolchain image is ~6 GB). `publish` runs only after the builds and tests passed and uploads those bytes to the S3-compatible bucket with `scripts/publish-artifacts.sh`:
 
 | Event | Mode | Writes |
 |---|---|---|
