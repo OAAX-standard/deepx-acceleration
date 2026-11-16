@@ -70,6 +70,23 @@ pytestmark = [
 ]
 
 
+def _model_args(model_name: str) -> list[str]:
+    """Per-model inference_runner arguments; repeat them to load several models."""
+    return [
+        "--model",
+        str(COMPILED_DIR / model_name / f"{model_name}.dxnn"),
+        "--input-size",
+        str(input_data_size(model_name)),
+        "--input-shape",
+        ",".join(str(d) for d in TEST_MODELS[model_name]["input_shape"]),
+    ]
+
+
+def _run(runner: Path, *args: str) -> subprocess.CompletedProcess:
+    cmd = [str(runner), *args, "--runs", str(_TEST_RUNS), "--warmup", str(_TEST_WARMUP), "--csv"]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -88,28 +105,7 @@ def runner() -> Path:
 @pytest.mark.parametrize("model_name", _models or ["_placeholder"])
 def test_inference_succeeds(runner, model_name):
     """inference_runner exits 0 and produces valid CSV output."""
-    dxnn = COMPILED_DIR / model_name / f"{model_name}.dxnn"
-    shape = ",".join(str(d) for d in TEST_MODELS[model_name]["input_shape"])
-
-    result = subprocess.run(
-        [
-            str(runner),
-            "--model",
-            str(dxnn),
-            "--input-size",
-            str(input_data_size(model_name)),
-            "--input-shape",
-            shape,
-            "--runs",
-            str(_TEST_RUNS),
-            "--warmup",
-            str(_TEST_WARMUP),
-            "--csv",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    result = _run(runner, *_model_args(model_name))
     assert result.returncode == 0, f"inference_runner failed for '{model_name}':\n{result.stderr.strip()}"
 
     line = result.stdout.strip()
@@ -120,28 +116,7 @@ def test_inference_succeeds(runner, model_name):
 @pytest.mark.parametrize("model_name", _models or ["_placeholder"])
 def test_inference_metrics_valid(runner, model_name):
     """Reported latency and throughput are positive finite numbers."""
-    dxnn = COMPILED_DIR / model_name / f"{model_name}.dxnn"
-    shape = ",".join(str(d) for d in TEST_MODELS[model_name]["input_shape"])
-
-    result = subprocess.run(
-        [
-            str(runner),
-            "--model",
-            str(dxnn),
-            "--input-size",
-            str(input_data_size(model_name)),
-            "--input-shape",
-            shape,
-            "--runs",
-            str(_TEST_RUNS),
-            "--warmup",
-            str(_TEST_WARMUP),
-            "--csv",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    result = _run(runner, *_model_args(model_name))
     if result.returncode != 0:
         pytest.skip("inference_runner failed — see test_inference_succeeds for details")
 
@@ -160,3 +135,28 @@ def test_inference_metrics_valid(runner, model_name):
     assert throughput > 0, f"throughput={throughput} should be positive"
     assert min_ms <= avg_ms <= max_ms, f"min={min_ms} <= avg={avg_ms} <= max={max_ms} violated"
     assert p50_ms <= p95_ms, f"p50={p50_ms} <= p95={p95_ms} violated"
+
+
+def test_multi_model_from_memory(runner):
+    """Two models loaded from memory in one call each report one valid CSV row."""
+    if len(_models) < 2:
+        pytest.skip("needs at least two compiled models")
+    names = _models[:2]
+
+    result = _run(runner, *_model_args(names[0]), *_model_args(names[1]), "--from-memory")
+    assert result.returncode == 0, f"inference_runner failed for {names}:\n{result.stderr.strip()}"
+
+    rows = [line.split(",") for line in result.stdout.strip().splitlines()]
+    assert [row[0] for row in rows] == names
+    for row in rows:
+        assert len(row) == 8, f"Expected 8 CSV fields, got: {row}"
+        assert int(row[1]) == _TEST_RUNS
+        assert float(row[7]) > 0, f"throughput={row[7]} should be positive"
+
+
+def test_unpaired_model_args_are_rejected(runner):
+    """Each --model needs its own --input-size; a count mismatch is a usage error (exit 2)."""
+    name = _models[0]
+    model = str(COMPILED_DIR / name / f"{name}.dxnn")
+    result = _run(runner, "--model", model, "--model", model, "--input-size", str(input_data_size(name)))
+    assert result.returncode == 2, result.stderr

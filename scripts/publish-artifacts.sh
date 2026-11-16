@@ -8,7 +8,7 @@
 # <artifacts-dir> holds the CI artifacts, one directory per artifact name (what actions/download-artifact creates):
 #   runtime-<arch>-ubuntu<version>/library-dxrt-v<dxrt version>.tar.gz   (6: x86_64 and aarch64 x Ubuntu 20.04, 22.04, 24.04)
 #   toolchain-image/oaax-deepx-toolchain.tar
-#   runtime-x86_64-windows/library-dxrt-*.tar.gz                          (optional: the Windows CI job is disabled)
+#   runtime-x86_64-windows/library-dxrt-v<dxrt version>.tar.gz
 # S3_ACCESS_KEY, S3_SECRET_KEY and S3_ENDPOINT_URL must be set for release and branch.
 #
 # release: keys under <version>/ are written once (if any exists nothing is uploaded: a published version is
@@ -56,11 +56,8 @@ for arch in x86_64 aarch64; do
 done
 f=$(single_file "$dir/toolchain-image" 'oaax-deepx-toolchain.tar')
 files[$f]="conversion-toolchain/@/DEEPX/oaax-deepx-toolchain.tar"
-# Windows is optional: its CI job is disabled until dx_rt_windows is reachable, so today there is no Windows key.
-if [ -d "$dir/runtime-x86_64-windows" ]; then
-  f=$(single_file "$dir/runtime-x86_64-windows" 'library-*.tar.gz')
-  files[$f]="runtimes/@/DEEPX/x86_64/Windows/$(basename "$f")"
-fi
+f=$(single_file "$dir/runtime-x86_64-windows" 'library-*.tar.gz')
+files[$f]="runtimes/@/DEEPX/x86_64/Windows/$(basename "$f")"
 
 if [ "$mode" = dry ]; then
   for f in "${!files[@]}"; do

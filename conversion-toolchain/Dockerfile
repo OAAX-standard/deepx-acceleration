@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-ARG DX_COM_VERSION=2.3.0
+ARG DX_COM_VERSION=2.5.0
 RUN pip install --no-cache-dir \
     "https://sdk.deepx.ai/release/dxcom/v${DX_COM_VERSION}/dx_com-${DX_COM_VERSION}-cp311-cp311-manylinux_2_31_x86_64.whl"
 

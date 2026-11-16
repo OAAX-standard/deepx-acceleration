@@ -1,106 +1,135 @@
+<#
+.SYNOPSIS
+    Builds RuntimeLibrary.dll for Windows x64 and packages it like the Linux build.
+
+.DESCRIPTION
+    DX-RT comes from one of:
+      -DxrtRoot <dir>  An installed DX-RT SDK: a directory with include\dxrt\, lib\dxrt.lib and
+                       lib\cmake\dxrt\, such as the DX-SDK Windows Installer's
+                       C:\Program Files\DEEPX\M1_M1M_Series\DX-RUNTIME\<version>.
+      (omitted)        The public dx_rt source in runtime-library\dx_rt, which is built and installed
+                       to dx_rt\out\install\x64-Release first (what CI does). Get it with
+                       git clone --branch v<dxrt_version.txt> https://github.com/DEEPX-AI/dx_rt.git runtime-library\dx_rt
+
+    RuntimeLibrary.dll links dxrt.dll dynamically and does not ship it: at run time it uses the
+    dxrt.dll the DX-SDK Windows Installer put on PATH.
+
+    Output in artifacts\x86_64-windows\: RuntimeLibrary.dll, its import library RuntimeLibrary.lib
+    (to link tests\runtime against it), and library-dxrt-<DX-RT version>.tar.gz holding the DLL only.
+
+.EXAMPLE
+    .\build-windows.ps1 -DxrtRoot "C:\Program Files\DEEPX\M1_M1M_Series\DX-RUNTIME\2.5.0"
+
+.EXAMPLE
+    .\build-windows.ps1
+#>
+[CmdletBinding()]
 param(
+    [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$DxrtRoot,
     [string]$RuntimeVersion
 )
 
-if (-not $DxrtRoot) {
-    Write-Error "DxrtRoot is required (path to DX-RT Windows SDK root containing include/ and lib/)."
-    exit 1
+$ErrorActionPreference = "Stop"
+
+# Runs a native command and throws if it fails.  Its output goes to the console, never into the
+# caller's return value.
+function Invoke-Native([string]$What, [scriptblock]$Command) {
+    & $Command | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE." }
 }
 
-# Resolve OAAX runtime version
-if (-not $RuntimeVersion) {
-    $versionPath = Join-Path $PSScriptRoot "..\VERSION"
-    if (Test-Path $versionPath) {
-        $RuntimeVersion = (Get-Content $versionPath -Raw).Trim()
+# Loads the Visual Studio 2022 x64 developer environment (cl, Ninja, VCPKG_ROOT) into this process.
+function Import-VsDevEnvironment {
+    if ($env:VSCMD_VER) { return }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsPath = $null
+    if (Test-Path $vswhere) {
+        $vsPath = & $vswhere -latest -products * -version "[17.0,18.0)" `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    }
+    if (-not $vsPath) { throw "Visual Studio 2022 with the C++ x64 build tools is required." }
+    $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    $environment = cmd /c "`"$vcvars`" >nul && set"
+    if ($LASTEXITCODE -ne 0) { throw "$vcvars failed with exit code $LASTEXITCODE." }
+    foreach ($line in $environment) {
+        if ($line -match "^([^=]+)=(.*)$") { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
     }
 }
 
+# Builds and installs the public dx_rt source with its own CMake preset and returns the install
+# directory.  dx_rt's build.ps1 is not used: besides building, it stops the dxrtd service and
+# reinstalls dx_rt's Python package into every Python on the machine.
+function Build-DxrtSource {
+    $source = Join-Path $PSScriptRoot "dx_rt"
+    if (-not (Test-Path (Join-Path $source "CMakePresets.json"))) {
+        $tag = "v" + (Get-Content (Join-Path $PSScriptRoot "dxrt_version.txt") -Raw).Trim()
+        throw "DX-RT source not found in $source. Pass -DxrtRoot, or clone it: " +
+            "git clone --branch $tag https://github.com/DEEPX-AI/dx_rt.git `"$source`""
+    }
+    Import-VsDevEnvironment
+    if (-not $env:VCPKG_ROOT) { throw "VCPKG_ROOT is not set; dx_rt's CMake preset needs vcpkg." }
+    # Like dx_rt's build.ps1: keep vcpkg downloads out of the (possibly read-only) vcpkg root.
+    if (-not $env:VCPKG_DOWNLOADS) { $env:VCPKG_DOWNLOADS = Join-Path $source "out\vcpkg-downloads" }
+
+    $preset = "x64-Release"
+    Push-Location $source
+    try {
+        Invoke-Native "DX-RT configure" { cmake --preset $preset }
+        Invoke-Native "DX-RT build" { cmake --build --preset $preset }
+        Invoke-Native "DX-RT install" { cmake --install "out\build\$preset" }
+    } finally {
+        Pop-Location
+    }
+    return Join-Path $source "out\install\$preset"
+}
+
+# Returns the DXRT_VERSION of the SDK (e.g. "v3.5.0"), which names the archive as on Linux.
+function Get-DxrtVersion([string]$Root) {
+    $genHeader = Join-Path $Root "include\dxrt\gen.h"
+    if (Test-Path $genHeader) {
+        $match = Select-String -Path $genHeader -Pattern '#define\s+DXRT_VERSION\s+"([^"]+)"' | Select-Object -First 1
+        if ($match) { return $match.Matches[0].Groups[1].Value }
+    }
+    throw "Cannot read DXRT_VERSION from $genHeader."
+}
+
 if (-not $RuntimeVersion) {
-    Write-Error "RuntimeVersion is required. Pass -RuntimeVersion or ensure ..\VERSION exists."
-    exit 1
+    $RuntimeVersion = (Get-Content (Join-Path $PSScriptRoot "..\VERSION") -Raw).Trim()
 }
 
-$buildDir = Join-Path $PSScriptRoot "build-windows"
-if (-not (Test-Path $buildDir)) {
-    New-Item -ItemType Directory -Path $buildDir | Out-Null
-}
-
-# Configure
-cmake -S $PSScriptRoot -B $buildDir `
-      -G "Visual Studio 17 2022" -A x64 `
-      -DDXRT_ROOT="$DxrtRoot" `
-      -DOAAX_RUNTIME_VERSION="$RuntimeVersion" `
-      -DCMAKE_BUILD_TYPE=$Configuration
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "CMake configuration failed with exit code $LASTEXITCODE."
-    exit $LASTEXITCODE
-}
-
-# Build
-cmake --build $buildDir --config $Configuration --parallel
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Build failed with exit code $LASTEXITCODE."
-    exit $LASTEXITCODE
-}
-
-# Prepare artifacts directory (aligned with Linux build layout)
-$artifactsRoot = Join-Path $PSScriptRoot "artifacts"
-$targetArch = "x86_64"  # Current Windows build targets x64
-$artifactsDirName = "$targetArch-windows"
-$artifactsDir = Join-Path $artifactsRoot $artifactsDirName
-
-if (-not (Test-Path $artifactsRoot)) {
-    New-Item -ItemType Directory -Path $artifactsRoot | Out-Null
-}
-
-if (Test-Path $artifactsDir) {
-    Remove-Item -Recurse -Force $artifactsDir
-}
-New-Item -ItemType Directory -Path $artifactsDir | Out-Null
-
-# Locate built DLL
-$dllName = "RuntimeLibrary.dll"
-$dllSourcePath = Join-Path (Join-Path $buildDir $Configuration) $dllName
-if (-not (Test-Path $dllSourcePath)) {
-    Write-Error "Expected DLL not found at $dllSourcePath. Ensure the CMake target name matches '$dllName'."
-    exit 1
-}
-
-Copy-Item $dllSourcePath -Destination $artifactsDir -Force
-
-# Read DXRT version from dxrt_version.txt file
-$dxrtVersionFile = Join-Path $PSScriptRoot "dxrt_version.txt"
-$dxrtVersion = $null
-if (Test-Path $dxrtVersionFile) {
-    $dxrtVersion = (Get-Content $dxrtVersionFile -Raw).Trim()
-    Write-Host "DX-RT version read from dxrt_version.txt: $dxrtVersion"
+if ($DxrtRoot) {
+    $DxrtRoot = (Resolve-Path $DxrtRoot).Path
 } else {
-    Write-Warning "DX-RT dxrt_version.txt file not found at $dxrtVersionFile. Using 'unknown' as version."
-    $dxrtVersion = "unknown"
+    $DxrtRoot = Build-DxrtSource
 }
+foreach ($required in "include\dxrt\dxrt_cxx_api.h", "lib\dxrt.lib", "lib\cmake\dxrt") {
+    if (-not (Test-Path (Join-Path $DxrtRoot $required))) { throw "$DxrtRoot is not a DX-RT SDK: $required is missing." }
+}
+$dxrtVersion = Get-DxrtVersion $DxrtRoot
+$pinnedVersion = "v" + (Get-Content (Join-Path $PSScriptRoot "dxrt_version.txt") -Raw).Trim()
+if ($dxrtVersion -ne $pinnedVersion) {
+    Write-Warning "DX-RT in $DxrtRoot is $dxrtVersion; dxrt_version.txt pins $pinnedVersion."
+}
+Write-Host "DX-RT $dxrtVersion from $DxrtRoot"
 
-# Compress the DLL into a tar.gz archive
-Write-Host "Compressing the runtime library into tar.gz archive..."
+# Always configure from scratch: a cached dxrt_DIR would keep linking a previously used SDK.
+$buildDir = Join-Path $PSScriptRoot "build-windows"
+if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+Invoke-Native "CMake configure" {
+    cmake -S $PSScriptRoot -B $buildDir -G "Visual Studio 17 2022" -A x64 `
+        "-DDXRT_ROOT=$DxrtRoot" "-DOAAX_RUNTIME_VERSION=$RuntimeVersion"
+}
+Invoke-Native "Build" { cmake --build $buildDir --config $Configuration --parallel }
+
+# Same layout as the Linux build: artifacts\<arch>-<os>\
+$artifactsDir = Join-Path $PSScriptRoot "artifacts\x86_64-windows"
+if (Test-Path $artifactsDir) { Remove-Item -Recurse -Force $artifactsDir }
+New-Item -ItemType Directory -Path $artifactsDir | Out-Null
+$outputDir = Join-Path $buildDir $Configuration
+Copy-Item (Join-Path $outputDir "RuntimeLibrary.dll"), (Join-Path $outputDir "RuntimeLibrary.lib") $artifactsDir
+
 $archiveName = "library-dxrt-$dxrtVersion.tar.gz"
-$archivePath = Join-Path $artifactsDir $archiveName
-$dllPath = Join-Path $artifactsDir $dllName
-
-# Change to artifacts directory to create archive with relative path
-Push-Location $artifactsDir
-try {
-    tar -czf $archiveName $dllName
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to create tar.gz archive. tar command exited with code $LASTEXITCODE."
-        exit $LASTEXITCODE
-    }
-    Write-Host "Library package created: $archivePath"
-} finally {
-    Pop-Location
-}
-
-Write-Host "RuntimeLibrary build completed. DLL copied to: $artifactsDir\$dllName"
-Write-Host "Archive created at: $archivePath"
+Invoke-Native "tar" { tar -czf (Join-Path $artifactsDir $archiveName) -C $artifactsDir RuntimeLibrary.dll }
+Write-Host "Built $artifactsDir\RuntimeLibrary.dll and $archiveName"

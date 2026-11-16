@@ -9,6 +9,8 @@
 #else
 #define RUNTIME_API __declspec(dllimport)
 #endif
+#elif defined(__GNUC__)
+#define RUNTIME_API __attribute__((visibility("default")))
 #else
 #define RUNTIME_API
 #endif
