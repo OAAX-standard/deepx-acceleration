@@ -60,8 +60,20 @@
 //     pool) outlives every job of that model, even across runtime_cleanup.
 //   - runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
 //     the number of pool buffers in use plus the pending requests.
+//   - Windows: a host that exits or calls FreeLibrary without runtime_cleanup
+//     must not hang.  See "Windows: unload without runtime_cleanup" below.
 
 #include "runtime_core.h"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <concurrentqueue.h>
 #include <dxrt/dxrt_cxx_api.h>
@@ -85,6 +97,7 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "buffer_pool.h"
@@ -206,7 +219,8 @@ std::shared_ptr<spdlog::logger> g_logger;
 std::atomic<bool> g_initialized{false};
 std::atomic<bool> g_shutting_down{false};
 
-std::vector<std::shared_ptr<ModelContext>> g_models;
+using ModelList = std::vector<std::shared_ptr<ModelContext>>;
+ModelList g_models;
 std::mutex g_models_mtx;
 
 // Serializes runtime_load_models and runtime_cleanup, so a load either
@@ -238,6 +252,39 @@ struct LastError {
     unsigned generation{0};
 };
 thread_local LastError t_last_error;
+
+#ifdef _WIN32
+// ---------------------------------------------------------------------------
+// Windows: unload without runtime_cleanup.
+//
+// Static destructors run at DLL_PROCESS_DETACH, under the loader lock, and at
+// process exit only after Windows has ended every other thread.  Destroying a
+// loaded model there waits for DX-RT's threads, which then never finish: the
+// host hangs in FreeLibrary or at exit.  So:
+//   - While models are loaded the DLL holds a reference to itself, dropped by
+//     runtime_cleanup.  FreeLibrary without cleanup then only drops the host's
+//     reference and returns; the DLL stays loaded until the process exits.
+//   - At process exit DllMain moves the loaded models out of g_models into
+//     storage that is never destroyed, so no engine destructor runs.  Windows
+//     reclaims the memory and the device handles.
+// ---------------------------------------------------------------------------
+HMODULE g_self_ref = nullptr;  // guarded by g_load_mtx
+
+void hold_self_reference() noexcept {
+    if (g_self_ref) return;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&hold_self_reference),
+                            &g_self_ref)) {
+        g_self_ref = nullptr;
+    }
+}
+
+void drop_self_reference() noexcept {
+    if (g_self_ref) {
+        FreeLibrary(g_self_ref);  // the caller still holds its own reference
+        g_self_ref = nullptr;
+    }
+}
+#endif
 
 // Records `msg` as the calling thread's last error.  Does not log: some errors
 // (e.g. backpressure) are expected on the hot path.  Never throws: if the
@@ -678,6 +725,9 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
         std::lock_guard<std::mutex> lk(g_models_mtx);
         g_models = std::move(models);
     }
+#ifdef _WIN32
+    hold_self_reference();
+#endif
     return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -888,6 +938,9 @@ RuntimeStatus runtime_cleanup(void) {
         g_logger->flush();
         g_logger.reset();
     }
+#ifdef _WIN32
+    drop_self_reference();
+#endif
     return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -941,3 +994,17 @@ const char *runtime_get_info(void) {
     info_json = buf;
     return info_json.c_str();
 }
+
+#ifdef _WIN32
+extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved) {
+    // reserved != NULL: the process is exiting and every other thread has
+    // ended.  Keep the loaded models out of the static destructors (see
+    // "Windows: unload without runtime_cleanup").  Moving the list allocates
+    // nothing and needs no lock, as no other thread is left.
+    if (reason == DLL_PROCESS_DETACH && reserved != nullptr) {
+        static std::aligned_storage<sizeof(ModelList), alignof(ModelList)>::type never_destroyed;
+        new (&never_destroyed) ModelList(std::move(g_models));
+    }
+    return TRUE;
+}
+#endif
