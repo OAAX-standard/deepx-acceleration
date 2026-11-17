@@ -60,6 +60,8 @@
 //     pool) outlives every job of that model, even across runtime_cleanup.
 //   - runtime_get_info's requests_in_flight (accepted, not yet retrieved) is
 //     the number of pool buffers in use plus the pending requests.
+//   - Windows: a host that exits or calls FreeLibrary without runtime_cleanup
+//     must not hang.  See platform.h.
 
 #include "runtime_core.h"
 
@@ -85,9 +87,11 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "buffer_pool.h"
+#include "platform.h"
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -206,7 +210,8 @@ std::shared_ptr<spdlog::logger> g_logger;
 std::atomic<bool> g_initialized{false};
 std::atomic<bool> g_shutting_down{false};
 
-std::vector<std::shared_ptr<ModelContext>> g_models;
+using ModelList = std::vector<std::shared_ptr<ModelContext>>;
+ModelList g_models;
 std::mutex g_models_mtx;
 
 // Serializes runtime_load_models and runtime_cleanup, so a load either
@@ -678,6 +683,7 @@ RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_confi
         std::lock_guard<std::mutex> lk(g_models_mtx);
         g_models = std::move(models);
     }
+    platform::hold_self_reference();
     return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -888,6 +894,7 @@ RuntimeStatus runtime_cleanup(void) {
         g_logger->flush();
         g_logger.reset();
     }
+    platform::drop_self_reference();
     return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -941,3 +948,13 @@ const char *runtime_get_info(void) {
     info_json = buf;
     return info_json.c_str();
 }
+
+#ifdef _WIN32
+void platform::abandon_models() noexcept {
+    // Keeps the loaded models out of the static destructors (see platform.h).
+    // Moving the list allocates nothing and needs no lock, as no other thread
+    // is left.
+    static std::aligned_storage<sizeof(ModelList), alignof(ModelList)>::type never_destroyed;
+    new (&never_destroyed) ModelList(std::move(g_models));
+}
+#endif

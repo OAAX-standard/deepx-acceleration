@@ -55,6 +55,9 @@ find_package(Threads REQUIRED)
 set(SOURCES
     src/runtime_core.cpp
 )
+if (WIN32)
+    list(APPEND SOURCES src/platform_windows.cpp)
+endif()
 
 # Add header files
 set(HEADERS

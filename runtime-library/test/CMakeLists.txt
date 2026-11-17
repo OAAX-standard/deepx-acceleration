@@ -34,6 +34,9 @@ add_executable(test_runtime
     test_runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/runtime_core.cpp
 )
+if (WIN32)
+    target_sources(test_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/platform_windows.cpp)
+endif()
 
 # Define RUNTIME_LIBRARY_EXPORTS so RUNTIME_API resolves to dllexport (not dllimport)
 target_compile_definitions(test_runtime PRIVATE RUNTIME_LIBRARY_EXPORTS)
